@@ -93,6 +93,8 @@ class RicochetMinerApp {
   private trajectoryDots: Array<{ x: number; y: number }> = [];
   private trajectoryImpact: { x: number; y: number } | null = null;
   private trajectorySecondImpact: { x: number; y: number } | null = null;
+  private targetedBlockId: number | null = null;
+  private secondTargetedBlockId: number | null = null;
   private trajectoryBounceIdx = 14;
   private aimFeedback: AimFeedback | null = null;
 
@@ -279,6 +281,20 @@ class RicochetMinerApp {
         this.persistSave();
       },
       onTogglePause: () => this.togglePause(),
+      onToggleAimMode: () => {
+        this.save.settings.aimMode =
+          this.save.settings.aimMode === 'slingshot' ? 'direct' : 'slingshot';
+        this.save.settings.aimModeUserSet = true;
+        this.audio.playClick();
+        this.aimAngleRad = null;
+        this.trajectoryDots = [];
+        this.trajectoryImpact = null;
+        this.trajectorySecondImpact = null;
+        this.targetedBlockId = null;
+        this.secondTargetedBlockId = null;
+        this.aimFeedback = null;
+        this.persistSave();
+      },
       onToggleSpeed: () => {
         const next = this.loop.getSpeedMultiplier() > 1 ? 1 : 2;
         this.loop.setSpeedMultiplier(next);
@@ -414,6 +430,8 @@ class RicochetMinerApp {
           this.trajectoryDots = [];
           this.trajectoryImpact = null;
           this.trajectorySecondImpact = null;
+          this.targetedBlockId = null;
+          this.secondTargetedBlockId = null;
           this.trajectoryBounceIdx = PHYSICS_CONFIG.TRAJECTORY_DOTS;
           return;
         }
@@ -434,6 +452,8 @@ class RicochetMinerApp {
         this.trajectoryDots = preview.dots;
         this.trajectoryImpact = preview.impactPoint;
         this.trajectorySecondImpact = preview.secondImpactPoint;
+        this.targetedBlockId = preview.impactBlockId;
+        this.secondTargetedBlockId = preview.secondImpactBlockId;
         this.trajectoryBounceIdx = preview.bounceStartIdx;
       },
       onLaunch: (angleRad) => {
@@ -717,7 +737,20 @@ class RicochetMinerApp {
       PHYSICS_CONFIG.LAUNCHER_Y,
       angleRad
     );
-    this.particles.emitBurst(muzzle.x, muzzle.y, 7, '#fde047', 100, 260, 3.6, 0.22);
+    this.particles.emitDirectionalBurst(
+      muzzle.x,
+      muzzle.y,
+      angleRad,
+      0.45,
+      9,
+      '#fde047',
+      160,
+      340,
+      3.6,
+      0.24,
+      'spark',
+      true
+    );
 
     const orb = this.physics.createOrb(
       muzzle.x,
@@ -1350,6 +1383,7 @@ class RicochetMinerApp {
       isTitle: this.stateMachine.state === 'TITLE',
       isRunning: this.stateMachine.state === 'RUNNING',
       isAiming: this.stateMachine.state === 'AIMING',
+      aimMode: this.save.settings.aimMode,
       muted: this.audio.isMuted(),
       speedMult: this.loop.getSpeedMultiplier(),
       hasElevator: this.save.unlockedBiomeIndex > 0,
@@ -1382,10 +1416,13 @@ class RicochetMinerApp {
       aimAngleRad: this.stateMachine.state === 'AIMING' ? this.aimAngleRad : null,
       isAimingState: this.stateMachine.state === 'AIMING',
       loadedOrbRadius: this.economy.getEffectiveOrbRadius(this.save),
+      loadedOrbCount: this.economy.getEffectiveMultiOrbCount(this.save),
       turretRecoil: this.turretRecoil,
       trajectoryDots: this.trajectoryDots,
       trajectoryImpact: this.trajectoryImpact,
       trajectorySecondImpact: this.trajectorySecondImpact,
+      targetedBlockId: this.targetedBlockId,
+      secondTargetedBlockId: this.secondTargetedBlockId,
       trajectoryBounceIdx: this.trajectoryBounceIdx,
       aimFeedback: this.aimFeedback,
       orbs: this.orbs,

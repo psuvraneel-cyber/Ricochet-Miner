@@ -708,10 +708,14 @@ export class PhysicsEngine {
     dots: Array<{ x: number; y: number }>;
     impactPoint: { x: number; y: number } | null;
     secondImpactPoint: { x: number; y: number } | null;
+    impactBlockId: number | null;
+    secondImpactBlockId: number | null;
     bounceStartIdx: number;
   } {
     let impactPoint: { x: number; y: number } | null = null;
     let secondImpactPoint: { x: number; y: number } | null = null;
+    let impactBlockId: number | null = null;
+    let secondImpactBlockId: number | null = null;
     let x = startX;
     let y = startY;
     let vx = Math.cos(angleRad) * PHYSICS_CONFIG.LAUNCH_SPEED;
@@ -724,12 +728,14 @@ export class PhysicsEngine {
     const simDt = 1 / 120;
     const maxFrames = 96; // ~0.8s flight lookahead
 
-    const recordImpact = (ix: number, iy: number) => {
+    const recordImpact = (ix: number, iy: number, blockId: number | null = null) => {
       if (bounces === 0) {
         impactPoint = { x: ix, y: iy };
+        impactBlockId = blockId;
         firstBouncePolyIdx = Math.max(0, poly.length - 1);
       } else if (bounces === 1) {
         secondImpactPoint = { x: ix, y: iy };
+        secondImpactBlockId = blockId;
       }
       bounces++;
     };
@@ -851,7 +857,7 @@ export class PhysicsEngine {
         if (hitBlock) {
           if (hitBlock.kind === 'portal_entry') {
             poly.push({ x: hitCx, y: hitCy, segment: bounces });
-            recordImpact(hitCx, hitCy);
+            recordImpact(hitCx, hitCy, hitBlock.id);
             bounces = maxBouncesPreview; // stop at warp entry cleanly
             break;
           }
@@ -881,7 +887,7 @@ export class PhysicsEngine {
           vy = clamped.vy;
 
           poly.push({ x, y, segment: bounces });
-          recordImpact(hitCx, hitCy);
+          recordImpact(hitCx, hitCy, hitBlock.id);
           if (bounces >= maxBouncesPreview) break;
         }
       }
@@ -930,6 +936,13 @@ export class PhysicsEngine {
       }
     }
 
-    return { dots, impactPoint, secondImpactPoint, bounceStartIdx };
+    return {
+      dots,
+      impactPoint,
+      secondImpactPoint,
+      impactBlockId,
+      secondImpactBlockId,
+      bounceStartIdx,
+    };
   }
 }

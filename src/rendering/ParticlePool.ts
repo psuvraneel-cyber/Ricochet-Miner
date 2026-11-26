@@ -89,6 +89,46 @@ export class ParticlePool {
     this.emitBurst(x, y, count, color, 140, 420, 3.2, 0.28, 'spark', true);
   }
 
+  emitDirectionalBurst(
+    x: number,
+    y: number,
+    angleRad: number,
+    spreadRad: number,
+    count: number,
+    color: string = '#fde047',
+    speedMin: number = 140,
+    speedMax: number = 320,
+    size: number = 3.5,
+    maxLife: number = 0.24,
+    kind: ParticleKind = 'spark',
+    additive: boolean = true
+  ): void {
+    for (let i = 0; i < count; i++) {
+      const p = this.pool[this.cursor];
+      this.cursor = (this.cursor + 1) % POOL_CAPACITY;
+
+      const t = count > 1 ? i / (count - 1) - 0.5 : 0;
+      const angle = angleRad + t * spreadRad + (Math.random() - 0.5) * 0.2;
+      const speed = speedMin + Math.random() * (speedMax - speedMin);
+      p.active = true;
+      p.kind = kind;
+      p.additive = additive;
+      p.x = x;
+      p.y = y;
+      p.vx = Math.cos(angle) * speed;
+      p.vy = Math.sin(angle) * speed;
+      p.size = size * (0.75 + Math.random() * 0.5);
+      p.rotation = angle;
+      p.vr = (Math.random() - 0.5) * 10;
+      p.drag = 0.95;
+      p.color = color;
+      p.alpha = 1;
+      p.life = maxLife * (0.8 + Math.random() * 0.4);
+      p.maxLife = p.life;
+      p.gravity = 180;
+    }
+  }
+
   emitRockShards(x: number, y: number, count: number, color: string): void {
     this.emitBurst(x, y, count, color, 80, 290, 5.2, 0.48, 'shard', false);
   }

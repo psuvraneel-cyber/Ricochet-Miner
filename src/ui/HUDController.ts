@@ -9,6 +9,7 @@ import { UI_ICONS } from './uiAssets';
 export interface HUDCallbacks {
   onToggleMute: () => void;
   onTogglePause: () => void;
+  onToggleAimMode: () => void;
   onToggleSpeed: () => void;
   onRecall: () => void;
   onOpenShop: () => void;
@@ -30,6 +31,8 @@ export class HUDController {
   private crestPillEl: HTMLElement;
   private crestTextEl: HTMLElement;
   private bouncesEl: HTMLElement;
+  private aimModeBtn: HTMLButtonElement;
+  private aimModeLblEl: HTMLElement;
   private muteBtn: HTMLButtonElement;
   private speedBtn: HTMLButtonElement;
   private recallBtn: HTMLButtonElement;
@@ -79,6 +82,9 @@ export class HUDController {
         <div class="rm-pill" data-hud="bounces-pill" style="display:none;">${svgIcon('lightning')} <span data-hud="bounces">0</span></div>
       </div>
       <div class="rm-pill-row rm-pill-row-nowrap">
+        <button class="rm-btn" data-interactive="true" data-hud="aim-mode" style="display:none;min-height:34px;padding:4px 8px;font-size:11px;" aria-label="Aim Mode">
+          ${svgIcon('orb')} <span data-hud="aim-mode-lbl">Direct</span>
+        </button>
         <button class="rm-btn" data-interactive="true" data-hud="pause" aria-label="Pause">${svgIcon('pause')}</button>
         <button class="rm-btn" data-interactive="true" data-hud="mute" aria-label="Mute">${svgIcon('soundOn')}</button>
       </div>
@@ -129,6 +135,9 @@ export class HUDController {
     this.crestPillEl = this.topEl.querySelector('[data-hud="crest-pill"]')!;
     this.crestTextEl = this.topEl.querySelector('[data-hud="crest-text"]')!;
     this.bouncesEl = this.topEl.querySelector('[data-hud="bounces"]')!;
+    this.aimModeBtn = this.topEl.querySelector('[data-hud="aim-mode"]')!;
+    this.aimModeLblEl = this.topEl.querySelector('[data-hud="aim-mode-lbl"]')!;
+    this.aimModeBtn.addEventListener('click', callbacks.onToggleAimMode);
     this.muteBtn = this.topEl.querySelector('[data-hud="mute"]')!;
     this.muteBtn.addEventListener('click', callbacks.onToggleMute);
     this.topEl.querySelector('[data-hud="pause"]')?.addEventListener('click', callbacks.onTogglePause);
@@ -233,6 +242,7 @@ export class HUDController {
     isTitle: boolean;
     isRunning: boolean;
     isAiming: boolean;
+    aimMode: 'slingshot' | 'direct';
     muted: boolean;
     speedMult: number;
     hasElevator: boolean;
@@ -291,6 +301,9 @@ export class HUDController {
     this.bouncesEl.textContent = Math.ceil(params.bouncesLeft).toString();
 
     this.runningBar.style.display = params.isRunning ? 'flex' : 'none';
+    this.aimModeBtn.style.display = params.isAiming ? 'inline-flex' : 'none';
+    this.aimModeLblEl.textContent =
+      params.aimMode === 'slingshot' ? i18n.t('aim_slingshot') : i18n.t('aim_direct');
     this.speedBtn.style.borderColor = params.speedMult > 1 ? '#fde047' : '#1a1310';
     this.arcadeConsole.style.display = params.isAiming ? 'flex' : 'none';
     this.elevatorBtn.style.display = params.hasElevator ? 'inline-flex' : 'none';

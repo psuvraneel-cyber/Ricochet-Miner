@@ -22,10 +22,13 @@ export interface RenderSceneState {
   aimAngleRad: number | null;
   isAimingState?: boolean;
   loadedOrbRadius?: number;
+  loadedOrbCount?: number;
   turretRecoil?: number;
   trajectoryDots: Array<{ x: number; y: number }>;
   trajectoryImpact: { x: number; y: number } | null;
   trajectorySecondImpact?: { x: number; y: number } | null;
+  targetedBlockId?: number | null;
+  secondTargetedBlockId?: number | null;
   trajectoryBounceIdx?: number;
   aimFeedback?: AimFeedback | null;
   orbs: readonly Orb[];
@@ -127,6 +130,17 @@ export class Renderer {
       this.renderEntity(ctx, block, biome, scene.timeS, rawDt);
     }
 
+    // Pulsing aim target highlight on 1st & 2nd predicted block/TNT hits
+    if (scene.aimAngleRad !== null && (scene.targetedBlockId || scene.secondTargetedBlockId)) {
+      this.renderTargetHighlights(
+        ctx,
+        scene.entities,
+        scene.targetedBlockId ?? null,
+        scene.secondTargetedBlockId ?? null,
+        scene.timeS
+      );
+    }
+
     // Golden Aim Trajectory & 2nd-Bounce Bank Preview
     if (scene.aimAngleRad !== null && scene.trajectoryDots.length > 0) {
       this.renderTrajectory(
@@ -149,6 +163,7 @@ export class Renderer {
       Boolean(scene.isAimingState),
       scene.skin,
       scene.loadedOrbRadius ?? 14,
+      scene.loadedOrbCount ?? 1,
       scene.timeS
     );
 
@@ -538,6 +553,7 @@ export class Renderer {
     isAimingState: boolean,
     skin: SkinSpec,
     loadedOrbRadius: number,
+    loadedOrbCount: number,
     timeS: number
   ): void {
     const angle = aimAngleRad ?? Math.PI * 0.5;
@@ -621,6 +637,69 @@ export class Renderer {
     }
 
     ctx.restore();
+
+    // Subtle xN Multi-Orb volley badge beside turret nozzle while aiming
+    if (isAimingState && loadedOrbCount > 1) {
+      const badgeX = x + 44;
+      const badgeY = y + 8;
+      ctx.save();
+      ctx.fillStyle = 'rgba(24, 18, 16, 0.88)';
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(badgeX - 18, badgeY - 11, 36, 22, 8);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#fde047';
+      ctx.font = '900 12px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`x${loadedOrbCount}`, badgeX, badgeY + 1);
+      ctx.restore();
+    }
+  }
+
+  private renderTargetHighlights(
+    ctx: CanvasRenderingContext2D,
+    entities: readonly BlockEntity[],
+    primaryId: number | null,
+    secondaryId: number | null,
+    timeS: number
+  ): void {
+    const pulse = 0.55 + 0.45 * Math.sin(timeS * 10);
+    for (let i = 0; i < entities.length; i++) {
+      const b = entities[i];
+      if (!b.alive) continue;
+      const isPrimary = b.id === primaryId;
+      const isSecondary = !isPrimary && b.id === secondaryId;
+      if (!isPrimary && !isSecondary) continue;
+
+      ctx.save();
+      if (b.kind === 'bumper' || b.kind === 'portal_entry') {
+        const cx = b.x + b.width * 0.5;
+        const cy = b.y + b.height * 0.5;
+        ctx.strokeStyle = isPrimary
+          ? `rgba(253, 224, 71, ${(0.65 + 0.35 * pulse).toFixed(2)})`
+          : 'rgba(56, 189, 248, 0.72)';
+        ctx.lineWidth = isPrimary ? 3 : 2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, b.radius + 4 + (isPrimary ? pulse * 2 : 0), 0, Math.PI * 2);
+        ctx.stroke();
+      } else {
+        const pad = isPrimary ? 2 + pulse * 1.5 : 1.5;
+        ctx.strokeStyle = isPrimary
+          ? `rgba(253, 224, 71, ${(0.72 + 0.28 * pulse).toFixed(2)})`
+          : 'rgba(56, 189, 248, 0.65)';
+        ctx.fillStyle = isPrimary
+          ? `rgba(253, 224, 71, ${(0.1 + 0.1 * pulse).toFixed(2)})`
+          : 'rgba(56, 189, 248, 0.08)';
+        ctx.lineWidth = isPrimary ? 3 : 2;
+        if (!isPrimary) ctx.setLineDash([5, 4]);
+        ctx.fillRect(b.x - pad, b.y - pad, b.width + pad * 2, b.height + pad * 2);
+        ctx.strokeRect(b.x - pad, b.y - pad, b.width + pad * 2, b.height + pad * 2);
+      }
+      ctx.restore();
+    }
   }
 
   private renderAimFeedback(ctx: CanvasRenderingContext2D, fb: AimFeedback, timeS: number): void {
