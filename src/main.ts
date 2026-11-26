@@ -1,0 +1,1417 @@
+import { AudioEngine } from './audio/AudioEngine';
+import { AD_CONFIG } from './config/adConfig';
+import {
+  ASCENSION_CONFIG,
+  BIOMES,
+  PHYSICS_CONFIG,
+  UPGRADES,
+  getMuzzlePosition,
+  type UpgradeId,
+} from './config/gameConfig';
+import { GameLoop } from './core/GameLoop';
+import { InputManager, type AimFeedback } from './core/InputManager';
+import { StateMachine } from './core/StateMachine';
+import { ViewportManager } from './core/ViewportManager';
+import { i18n, type SupportedLocale, type TranslationKey } from './i18n/translations';
+import { PhysicsEngine } from './physics/PhysicsEngine';
+import { FloatingTextPool } from './rendering/FloatingTextPool';
+import { JuiceSystem } from './rendering/JuiceSystem';
+import { ParticlePool } from './rendering/ParticlePool';
+import { Renderer } from './rendering/Renderer';
+import { PlatformSDK } from './sdk/PlatformSDK';
+import {
+  SaveManager,
+  createDefaultSave,
+  parseAndMigrateSave,
+  resolveSaveConflict,
+  type SaveData,
+} from './sdk/SaveManager';
+import { EconomySystem } from './systems/EconomySystem';
+import { MonetizationSystem } from './systems/MonetizationSystem';
+import { ProgressionSystem } from './systems/ProgressionSystem';
+import { RetentionSystem } from './systems/RetentionSystem';
+import { SkinSystem } from './systems/SkinSystem';
+import { AchievementsModal } from './ui/AchievementsModal';
+import { AscensionVictoryModal } from './ui/AscensionVictoryModal';
+import { DebugOverlay } from './ui/DebugOverlay';
+import { FTUEOverlay } from './ui/FTUEOverlay';
+import { HUDController } from './ui/HUDController';
+import { RetentionModals } from './ui/RetentionModals';
+import { RunSummaryModal } from './ui/RunSummaryModal';
+import { SettingsModal } from './ui/SettingsModal';
+import { ShopOverlay } from './ui/ShopOverlay';
+import { TitleOverlay } from './ui/TitleOverlay';
+import { injectGameStyles } from './ui/styles';
+import { formatCompact } from './utils/format';
+import { BiomeTheme } from './world/BiomeTheme';
+import type { BlockEntity, CoinDrop, Orb } from './world/Entities';
+import { ShaftGenerator } from './world/ShaftGenerator';
+
+const COIN_POOL_SIZE = 96;
+
+class RicochetMinerApp {
+  private canvas: HTMLCanvasElement;
+  private uiRoot: HTMLElement;
+  private adShield: HTMLDivElement;
+  private saveManager = new SaveManager();
+  private save: SaveData = createDefaultSave();
+
+  private stateMachine = new StateMachine();
+  private viewport: ViewportManager;
+  private renderer: Renderer;
+  private physics = new PhysicsEngine();
+  private particles = new ParticlePool();
+  private floatingText = new FloatingTextPool();
+  private juice = new JuiceSystem();
+
+  private economy = new EconomySystem();
+  private progression = new ProgressionSystem();
+  private retention = new RetentionSystem();
+  private skins = new SkinSystem();
+  private monetization = new MonetizationSystem();
+  private audio = new AudioEngine(false);
+
+  private hud!: HUDController;
+  private ftue!: FTUEOverlay;
+  private shop!: ShopOverlay;
+  private summary!: RunSummaryModal;
+  private victoryModal!: AscensionVictoryModal;
+  private achievementsModal!: AchievementsModal;
+  private retentionModals!: RetentionModals;
+  private settingsModal!: SettingsModal;
+  private titleOverlay!: TitleOverlay;
+  private input!: InputManager;
+  private loop!: GameLoop;
+  private generator!: ShaftGenerator;
+
+  private entities: BlockEntity[] = [];
+  private orbs: Orb[] = [];
+  private coins: CoinDrop[] = [];
+  private coinCursor = 0;
+  private cameraY = 0;
+  private aimAngleRad: number | null = null;
+  private trajectoryDots: Array<{ x: number; y: number }> = [];
+  private trajectoryImpact: { x: number; y: number } | null = null;
+  private trajectorySecondImpact: { x: number; y: number } | null = null;
+  private trajectoryBounceIdx = 14;
+  private aimFeedback: AimFeedback | null = null;
+
+  private pendingVolleyOrbs = 0;
+  private volleyTimerS = 0;
+  private volleyAngleRad = Math.PI / 2;
+  private isOverdriveRun = false;
+
+  private runCoins = 0;
+  private runMaxDepthM = 0;
+  private runStartBestDepthM = 0;
+  private runElapsedS = 0;
+  private isFullShaftRun = true;
+  private runBlocksSmashed = 0;
+  private runMaxCombo = 0;
+  private runTntCount = 0;
+  private clearedBiome6ThisRun = false;
+  private victorySlowMoTimer = 0;
+  private pendingVictoryTier: number | null = null;
+  private hasStartedGameplayOnce = false;
+  private pausedFromState: 'AIMING' | 'RUNNING' | null = null;
+  private bossActiveForAudio = false;
+  private pendingBiomeUnlock: { biomeIndex: number; unlockedSkinNames: string[] } | null = null;
+  private turretRecoil = 0;
+  private timeS = 0;
+
+  constructor() {
+    injectGameStyles();
+    const canvas = document.getElementById('game-canvas') as HTMLCanvasElement | null;
+    const uiRoot = document.getElementById('ui-root');
+    if (!canvas || !uiRoot) throw new Error('Missing #game-canvas or #ui-root');
+    this.canvas = canvas;
+    this.uiRoot = uiRoot;
+    this.adShield = document.createElement('div');
+    this.adShield.style.cssText =
+      'position:absolute;inset:0;z-index:999;background:transparent;pointer-events:auto;display:none;';
+    this.uiRoot.appendChild(this.adShield);
+    for (let i = 0; i < COIN_POOL_SIZE; i++) {
+      this.coins.push({
+        x: 0,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        value: 0,
+        life: 0,
+        magnetized: false,
+        alive: false,
+      });
+    }
+    this.viewport = new ViewportManager(this.canvas);
+    this.renderer = new Renderer(this.canvas);
+  }
+
+  async boot(): Promise<void> {
+    PlatformSDK.loadingStart();
+    const nowMs = PlatformSDK.getServerTimeMs();
+    const localSave = this.saveManager.loadLocal(nowMs);
+    const cloudRaw = await PlatformSDK.loadCloudData();
+    const cloudSave = cloudRaw ? parseAndMigrateSave(cloudRaw, nowMs) : null;
+    this.save = resolveSaveConflict(localSave, cloudSave);
+
+    i18n.setLocale(this.save.settings.localeOverride ?? PlatformSDK.getLocale());
+
+    this.audio.setUserMuted(this.save.settings.muted);
+    this.audio.setSfxMuted(this.save.settings.sfxMuted);
+    this.audio.setMusicVolume(
+      this.save.settings.musicVolume ?? (this.save.settings.musicMuted ? 'off' : 'high')
+    );
+    if (!this.save.settings.aimModeUserSet) {
+      this.save.settings.aimMode = this.getDefaultAimModeForDevice();
+    }
+    this.retention.refreshDailyQuestsIfNeeded(this.save, nowMs);
+    this.retention.syncLoginStreakState(this.save, nowMs);
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+          PlatformSDK.gameplayStop();
+        } else if (
+          this.hasStartedGameplayOnce &&
+          (this.stateMachine.state === 'AIMING' || this.stateMachine.state === 'RUNNING')
+        ) {
+          PlatformSDK.gameplayStart();
+        }
+      });
+    }
+
+    PlatformSDK.setAdLifecycleCallbacks({
+      onBeforeAd: () => {
+        this.stateMachine.pauseForAd();
+        this.audio.pauseForAd();
+        this.input.setLocked(true);
+        this.adShield.style.display = 'block';
+      },
+      onAfterAd: () => {
+        this.adShield.style.display = 'none';
+        this.audio.resumeFromAd();
+        this.input.setLocked(false);
+        this.stateMachine.resumeFromAd();
+        if (
+          this.hasStartedGameplayOnce &&
+          (this.stateMachine.state === 'AIMING' || this.stateMachine.state === 'RUNNING')
+        ) {
+          PlatformSDK.gameplayStart();
+        }
+        this.loop.resetAccumulator();
+      },
+    });
+
+    this.setupUI();
+    this.setupInput();
+    this.setupPhysicsEvents();
+
+    await this.renderer.preloadAssets();
+
+    this.generator = new ShaftGenerator({
+      baseRowOffset: this.progression.getBaseRowOffset(this.save),
+      luckLevel: this.save.upgrades.luck,
+      bossGateHpByBiome: this.save.bossGateHpByBiome,
+      unlockedBiomeIndex: this.save.unlockedBiomeIndex,
+      ascensionTier: this.save.ascensionTier,
+    });
+    this.resetShaft();
+
+    this.loop = new GameLoop({
+      onFixedUpdate: (dt) => this.fixedUpdate(dt),
+      onRender: (_alpha, rawDt) => this.render(rawDt),
+      onVisibilityBlur: () => {
+        this.input?.setLocked(false);
+      },
+    });
+
+    this.stateMachine.transition('TITLE');
+    this.showTitleScreen();
+    PlatformSDK.loadingStop();
+    this.loop.start();
+
+    // Offline Idle Drill check
+    const offlineCoins = this.retention.calculateOfflineEarnings(this.save, nowMs);
+    if (offlineCoins > 0) {
+      this.retentionModals.showOfflineModal(offlineCoins, async (doubled) => {
+        let payout = offlineCoins;
+        if (doubled) {
+          const res = await this.monetization.showRewarded('rv_offline_double');
+          if (res.rewarded) {
+            payout *= 2;
+          } else {
+            this.showAdFailureToast(res.reason);
+          }
+        }
+        this.save.coins += payout;
+        this.save.totalCoinsEarned += payout;
+        this.persistSave();
+      });
+    }
+  }
+
+  private setupUI(): void {
+    this.ftue = new FTUEOverlay(this.uiRoot);
+    this.ftue.setVisible(false);
+
+    this.shop = new ShopOverlay(this.uiRoot);
+    this.summary = new RunSummaryModal(this.uiRoot);
+    this.victoryModal = new AscensionVictoryModal(this.uiRoot);
+    this.achievementsModal = new AchievementsModal(this.uiRoot);
+    this.retentionModals = new RetentionModals(this.uiRoot);
+    this.settingsModal = new SettingsModal(this.uiRoot);
+    this.titleOverlay = new TitleOverlay(this.uiRoot);
+
+    this.hud = new HUDController(this.uiRoot, {
+      onToggleMute: () => {
+        this.save.settings.muted = this.audio.toggleMute();
+        this.persistSave();
+      },
+      onTogglePause: () => this.togglePause(),
+      onToggleSpeed: () => {
+        const next = this.loop.getSpeedMultiplier() > 1 ? 1 : 2;
+        this.loop.setSpeedMultiplier(next);
+      },
+      onRecall: () => {
+        for (const orb of this.orbs) {
+          orb.alive = false;
+        }
+        this.pendingVolleyOrbs = 0;
+      },
+      onOpenShop: () => this.openShop(),
+      onOpenAchievements: () => this.openAchievements(false),
+      onOpenQuests: () => {
+        PlatformSDK.gameplayStop();
+        this.stateMachine.transition('SHOP');
+        this.retentionModals.showDailyQuests(
+          this.save,
+          this.retention,
+          (qId) => {
+            const reward = this.retention.claimQuest(this.save, qId);
+            if (reward > 0) {
+              this.audio.playUpgrade();
+              this.persistSave();
+              this.retentionModals.hide();
+              this.resumeToAiming();
+            }
+          },
+          () => {
+            if (this.retention.claimMegaChest(this.save)) {
+              this.audio.playUpgrade();
+              this.persistSave();
+              this.retentionModals.hide();
+              this.resumeToAiming();
+            }
+          },
+          () => this.resumeToAiming()
+        );
+      },
+      onOpenDailyLogin: () => {
+        PlatformSDK.gameplayStop();
+        this.stateMachine.transition('SHOP');
+        this.retentionModals.showDailyLogin(
+          this.save,
+          () => {
+            if (this.retention.claimDailyLoginReward(this.save, PlatformSDK.getServerTimeMs())) {
+              this.audio.playUpgrade();
+              this.persistSave();
+            }
+          },
+          () => this.resumeToAiming()
+        );
+      },
+      onOpenElevator: () => {
+        PlatformSDK.gameplayStop();
+        this.stateMachine.transition('SHOP');
+        this.retentionModals.showElevator(
+          this.save,
+          (biomeIdx) => {
+            if (this.progression.selectBiome(this.save, biomeIdx)) {
+              this.persistSave();
+              this.resetShaft();
+            }
+          },
+          () => this.resumeToAiming()
+        );
+      },
+      onTriggerOverdriveAd: async () => {
+        const res = await this.monetization.showRewarded('rv_overdrive_trial');
+        if (res.rewarded) {
+          this.monetization.markOverdriveOffered(this.save.runsCompleted);
+          this.save.overdrivePasses += 1;
+          this.persistSave();
+          this.hud.showToast('Super-Orb Armed!');
+        } else {
+          this.showAdFailureToast(res.reason);
+        }
+      },
+    });
+
+    new DebugOverlay(this.uiRoot, {
+      getSave: () => this.save,
+      onAddCoins: (amt) => {
+        this.save.coins += amt;
+        this.save.totalCoinsEarned += amt;
+        this.persistSave();
+      },
+      onUnlockAllBiomes: () => {
+        this.save.unlockedBiomeIndex = 5;
+        this.persistSave();
+      },
+      onSimulateOneShotClear: () => this.simulateFinalGateClear(true),
+      onSimulateElevatorClear: () => this.simulateFinalGateClear(false),
+      onResetSave: () => {
+        this.save = createDefaultSave();
+        this.persistSave();
+        this.resetShaft();
+        this.ftue.setVisible(true);
+      },
+    });
+  }
+
+  private setupInput(): void {
+    this.input = new InputManager(this.canvas, {
+      canAim: () => this.stateMachine.state === 'AIMING',
+      getAimMode: () => this.save.settings.aimMode,
+      getLauncherPos: () => ({
+        x: PHYSICS_CONFIG.SHAFT_WIDTH * 0.5,
+        y: PHYSICS_CONFIG.LAUNCHER_Y,
+      }),
+      clientToWorld: (cx, cy) => this.viewport.clientToWorld(cx, cy, this.cameraY),
+      onAimStart: () => {
+        this.audio.unlock();
+        if (!this.hasStartedGameplayOnce) {
+          this.hasStartedGameplayOnce = true;
+          PlatformSDK.gameplayStart();
+        }
+      },
+      onAimUpdate: (angleRad, canceled, feedback) => {
+        this.aimFeedback = feedback ?? null;
+        if (canceled || angleRad === null) {
+          this.aimAngleRad = null;
+          this.trajectoryDots = [];
+          this.trajectoryImpact = null;
+          this.trajectorySecondImpact = null;
+          this.trajectoryBounceIdx = PHYSICS_CONFIG.TRAJECTORY_DOTS;
+          return;
+        }
+        this.aimAngleRad = angleRad;
+        const orbR = this.economy.getEffectiveOrbRadius(this.save);
+        const muzzle = getMuzzlePosition(
+          PHYSICS_CONFIG.SHAFT_WIDTH * 0.5,
+          PHYSICS_CONFIG.LAUNCHER_Y,
+          angleRad
+        );
+        const preview = this.physics.computeTrajectoryPreview(
+          muzzle.x,
+          muzzle.y,
+          angleRad,
+          orbR,
+          this.entities
+        );
+        this.trajectoryDots = preview.dots;
+        this.trajectoryImpact = preview.impactPoint;
+        this.trajectorySecondImpact = preview.secondImpactPoint;
+        this.trajectoryBounceIdx = preview.bounceStartIdx;
+      },
+      onLaunch: (angleRad) => {
+        if (!this.save.ftueDone) {
+          this.save.ftueDone = true;
+          this.ftue.setVisible(false);
+        }
+        this.launchVolley(angleRad);
+      },
+      onQuickRelaunch: () => {
+        if (this.stateMachine.state === 'RUN_SUMMARY') {
+          this.summary.hide();
+          this.prepareNextRun();
+        }
+      },
+      onToggleMute: () => {
+        this.save.settings.muted = this.audio.toggleMute();
+        this.persistSave();
+      },
+      onTogglePause: () => this.togglePause(),
+      onBuyUpgradeSlot: (slotIndex) => {
+        if (this.stateMachine.state !== 'SHOP') return;
+        const spec = UPGRADES[slotIndex];
+        if (spec && this.economy.buyUpgrade(this.save, spec.id)) {
+          this.audio.playUpgrade();
+          this.persistSave();
+        }
+      },
+    });
+  }
+
+  private spawnCoinDrop(x: number, y: number, value: number): void {
+    const slot = this.coins[this.coinCursor];
+    this.coinCursor = (this.coinCursor + 1) % COIN_POOL_SIZE;
+    slot.x = x;
+    slot.y = y;
+    slot.vx = (Math.random() - 0.5) * 140;
+    slot.vy = -140 - Math.random() * 80;
+    slot.value = value;
+    slot.life = 0.7;
+    slot.magnetized = true;
+    slot.alive = true;
+  }
+
+  private setupPhysicsEvents(): void {
+    this.physics.setEvents({
+      onWallHit: (orb, x, y) => {
+        this.audio.playWallHit(Math.hypot(orb.vx, orb.vy));
+        this.particles.emitBurst(x, y, 4, '#38bdf8', 50, 140, 3, 0.25);
+      },
+      onBlockHit: (orb, block, _dmg, cleaved) => {
+        const cx = block.x + block.width * 0.5;
+        const cy = block.y + block.height * 0.5;
+        this.audio.playHit(
+          orb.comboCount,
+          cleaved,
+          block.kind === 'granite' || block.kind === 'boss_armor',
+          Math.hypot(orb.vx, orb.vy)
+        );
+        this.particles.emitBurst(cx, cy, cleaved ? 8 : 5, '#e2e8f0', 70, 200, 3.5, 0.3);
+        this.juice.triggerShake(cleaved ? 3.5 : 1.8);
+        if (cleaved) {
+          this.floatingText.spawn(cx, cy - 12, 'CLEAVE!', '#38bdf8', 1.05);
+        }
+        if (orb.comboCount > this.runMaxCombo) {
+          this.runMaxCombo = orb.comboCount;
+        }
+        if (orb.comboCount > this.save.stats.maxBounceCombo) {
+          this.save.stats.maxBounceCombo = orb.comboCount;
+        }
+      },
+      onBlockDestroyed: (block, coins, isTnt, isVault) => {
+        const cx = block.x + block.width * 0.5;
+        const cy = block.y + block.height * 0.5;
+        this.runCoins += coins;
+        this.runBlocksSmashed += 1;
+        this.save.coins += coins;
+        this.save.totalCoinsEarned += coins;
+        this.save.stats.blocksDestroyed += 1;
+        this.retention.recordQuestProgress(this.save, 'blocksDestroyed', 1);
+        if (!isTnt) {
+          this.audio.playCrunch(block.kind === 'granite');
+        }
+
+        if (isTnt) {
+          this.runTntCount += 1;
+          this.save.stats.tntDetonated += 1;
+          this.retention.recordQuestProgress(this.save, 'tntDetonated', 1);
+        }
+        if (isVault) {
+          this.save.stats.vaultsBroken += 1;
+          this.save.shards += 1;
+          this.retention.recordQuestProgress(this.save, 'vaultsBroken', 1);
+          this.audio.playFanfare();
+          this.juice.triggerHitStop(0.04);
+          this.floatingText.spawn(cx, cy - 18, '+1 SHARD!', '#e879f9', 1.25);
+          PlatformSDK.happytime();
+        }
+
+        if (coins > 0) {
+          this.audio.playCoin();
+          this.floatingText.spawn(cx, cy, `+${formatCompact(coins)}`, '#fbbf24', 1);
+          this.spawnCoinDrop(cx, cy, coins);
+        }
+      },
+      onTntExplode: (x, y, radius) => {
+        this.audio.playExplosion();
+        if (this.runTntCount >= 2) {
+          this.audio.duck(500);
+        }
+        this.juice.triggerHitStop(0.035);
+        this.juice.triggerShake(7.5);
+        this.juice.triggerVignette(0.35);
+        this.juice.addShockwave(x, y, radius, '#fb923c');
+        this.particles.emitBurst(x, y, 22, '#fb923c', 120, 380, 5, 0.45);
+      },
+      onBumperHit: (orb, bumper, coins) => {
+        const cx = bumper.x + bumper.width * 0.5;
+        const cy = bumper.y + bumper.height * 0.5;
+        this.audio.playBumper(orb.comboCount);
+        this.save.stats.bumpersHit += 1;
+        this.retention.recordQuestProgress(this.save, 'bumpersHit', 1);
+        this.runCoins += coins;
+        this.save.coins += coins;
+        this.save.totalCoinsEarned += coins;
+        this.floatingText.spawn(cx, cy - 10, '+2 BOUNCE', '#22d3ee', 1.1);
+        this.particles.emitBurst(cx, cy, 8, '#e879f9', 80, 220, 4, 0.3);
+      },
+      onLaserFire: (rowY) => {
+        this.audio.playExplosion();
+        this.juice.addLaserBeam(rowY, '#fef08a');
+        this.juice.triggerShake(4.5);
+      },
+      onPortalWarp: (_orb, from, to) => {
+        this.audio.playBumper(6);
+        this.particles.emitBurst(from.x + 28, from.y + 28, 10, '#a3e635', 60, 180, 4, 0.35);
+        this.particles.emitBurst(to.x + 28, to.y + 28, 10, '#f43f5e', 60, 180, 4, 0.35);
+        this.floatingText.spawn(to.x + 28, to.y, '+2 WARP!', '#a3e635', 1.15);
+      },
+      onBossCoreDamaged: (biomeIndex, coreIndex, hpLeft) => {
+        this.progression.recordBossCoreDamage(this.save, biomeIndex, coreIndex, hpLeft);
+      },
+      onBossGateBroken: (biomeIndex) => {
+        if (biomeIndex >= ASCENSION_CONFIG.FINAL_BIOME_INDEX) {
+          this.clearedBiome6ThisRun = true;
+          const res = this.progression.completeFinalGateClear(
+            this.save,
+            this.isFullShaftRun,
+            {
+              blocksSmashed: this.runBlocksSmashed,
+              maxCombo: this.runMaxCombo,
+              timestamp: PlatformSDK.getServerTimeMs(),
+            }
+          );
+          if (res.ascended) {
+            this.audio.playVictoryFanfare();
+            this.juice.triggerHitStop(0.06);
+            this.juice.triggerShake(10);
+            PlatformSDK.happytime();
+            const midX = PHYSICS_CONFIG.SHAFT_WIDTH * 0.5;
+            const midY = this.cameraY + 240;
+            this.particles.emitBurst(midX, midY, 50, '#fde047', 120, 440, 6, 1.3);
+            this.particles.emitBurst(midX - 70, midY - 30, 40, '#f59e0b', 110, 400, 5.5, 1.25);
+            this.particles.emitBurst(midX + 70, midY - 30, 40, '#fffbeb', 110, 400, 5, 1.2);
+            this.particles.emitBurst(midX, midY - 60, 25, '#38bdf8', 90, 360, 5, 1.15);
+            this.pendingVictoryTier = res.newTier;
+            this.victorySlowMoTimer = 0.45;
+          } else {
+            this.audio.playFanfare();
+            this.juice.triggerHitStop(0.05);
+            this.juice.triggerShake(8);
+            PlatformSDK.happytime();
+            this.hud.showToast(i18n.t('elevator_clear_title'));
+          }
+          this.persistSave();
+          return;
+        }
+
+        this.audio.playFanfare();
+        this.juice.triggerHitStop(0.05);
+        this.juice.triggerShake(8);
+        PlatformSDK.happytime();
+        const unlockedBiome = this.progression.unlockNextBiome(this.save, biomeIndex);
+        this.generator.updateOptions({ unlockedBiomeIndex: this.save.unlockedBiomeIndex });
+        const newlyUnlockedIds = this.skins.checkAndUnlockEligibleSkins(this.save);
+        const unlockedSkinNames = newlyUnlockedIds.map((id) => {
+          const sk = this.skins.getEquippedSkin({ ...this.save, equippedSkin: id });
+          return i18n.t(sk.nameKey as TranslationKey);
+        });
+        if (unlockedBiome) {
+          this.pendingBiomeUnlock = {
+            biomeIndex: this.save.unlockedBiomeIndex,
+            unlockedSkinNames,
+          };
+          this.hud.showToast(i18n.t('biome_unlocked_title'));
+        }
+        this.persistSave();
+      },
+    });
+  }
+
+  private resetShaft(): void {
+    this.entities = [];
+    this.orbs.length = 0;
+    for (let i = 0; i < COIN_POOL_SIZE; i++) {
+      this.coins[i].alive = false;
+    }
+    this.cameraY = 0;
+    this.particles.clear();
+    this.floatingText.clear();
+    this.juice.clear();
+
+    this.generator.reset({
+      baseRowOffset: this.progression.getBaseRowOffset(this.save),
+      luckLevel: this.save.upgrades.luck,
+      bossGateHpByBiome: this.save.bossGateHpByBiome,
+      unlockedBiomeIndex: this.save.unlockedBiomeIndex,
+      ascensionTier: this.save.ascensionTier,
+    });
+    this.generator.ensureChunksUpToRow(24, this.entities);
+  }
+
+  private launchVolley(angleRad: number): void {
+    this.audio.playLaunch();
+    this.aimFeedback = null;
+    this.aimAngleRad = null;
+    this.trajectoryDots = [];
+    this.trajectoryImpact = null;
+    this.trajectorySecondImpact = null;
+    this.stateMachine.transition('RUNNING');
+    this.loop.setSpeedMultiplier(1);
+    this.runCoins = 0;
+    this.runStartBestDepthM = this.save.maxDepthMeters;
+    const selectedStartDepth = this.progression.getSelectedBiome(this.save).startDepthM;
+    this.runMaxDepthM = selectedStartDepth;
+    this.runElapsedS = 0;
+    this.isFullShaftRun = selectedStartDepth === 0;
+    this.runBlocksSmashed = 0;
+    this.runMaxCombo = 0;
+    this.runTntCount = 0;
+    this.clearedBiome6ThisRun = false;
+    this.victorySlowMoTimer = 0;
+    this.pendingVictoryTier = null;
+
+    if (this.save.overdrivePasses > 0) {
+      this.save.overdrivePasses -= 1;
+      this.isOverdriveRun = true;
+    } else {
+      this.isOverdriveRun = false;
+    }
+
+    const totalOrbs = this.economy.getEffectiveMultiOrbCount(this.save);
+    this.volleyAngleRad = angleRad;
+    this.pendingVolleyOrbs = totalOrbs - 1;
+    this.volleyTimerS = 0;
+    this.spawnLauncherOrb(angleRad);
+  }
+
+  private spawnLauncherOrb(angleRad: number): void {
+    this.turretRecoil = 1;
+    const baseR = this.economy.getEffectiveOrbRadius(this.save);
+    const radius = this.isOverdriveRun ? baseR * 1.4 : baseR;
+    const bounces = this.economy.getEffectiveMaxBounces(this.save);
+    const damage = this.economy.getEffectiveDrillDamage(this.save) * (this.isOverdriveRun ? 1.5 : 1);
+    const muzzle = getMuzzlePosition(
+      PHYSICS_CONFIG.SHAFT_WIDTH * 0.5,
+      PHYSICS_CONFIG.LAUNCHER_Y,
+      angleRad
+    );
+    this.particles.emitBurst(muzzle.x, muzzle.y, 7, '#fde047', 100, 260, 3.6, 0.22);
+
+    const orb = this.physics.createOrb(
+      muzzle.x,
+      muzzle.y,
+      angleRad,
+      radius,
+      bounces,
+      damage,
+      false,
+      this.isOverdriveRun
+    );
+    this.orbs.push(orb);
+  }
+
+  private fixedUpdate(dt: number): void {
+    this.monetization.updateSessionTime(dt);
+    this.timeS += dt;
+    if (this.turretRecoil > 0) {
+      this.turretRecoil = Math.max(0, this.turretRecoil - dt * 8);
+    }
+
+    const selectedBiome = this.progression.getSelectedBiome(this.save);
+    const viewDepth =
+      selectedBiome.startDepthM +
+      (this.cameraY / PHYSICS_CONFIG.TILE_SIZE) * PHYSICS_CONFIG.METERS_PER_ROW;
+    const activeBiome = BiomeTheme.getBiomeAtDepth(viewDepth);
+    this.audio.updateMusicState(
+      activeBiome.index,
+      this.stateMachine.state,
+      this.bossActiveForAudio
+    );
+
+    if (this.stateMachine.state !== 'RUNNING') return;
+
+    this.runElapsedS += dt;
+    if (this.juice.consumeHitStop(dt)) {
+      this.juice.update(dt);
+      return;
+    }
+
+    let simDt = dt;
+    if (this.victorySlowMoTimer > 0) {
+      this.victorySlowMoTimer = Math.max(0, this.victorySlowMoTimer - dt);
+      simDt = dt * 0.3;
+    }
+
+    if (this.pendingVolleyOrbs > 0) {
+      this.volleyTimerS += simDt;
+      if (this.volleyTimerS >= PHYSICS_CONFIG.MULTI_ORB_INTERVAL_S) {
+        this.volleyTimerS -= PHYSICS_CONFIG.MULTI_ORB_INTERVAL_S;
+        this.pendingVolleyOrbs--;
+        this.spawnLauncherOrb(this.volleyAngleRad);
+      }
+    }
+
+    this.physics.step(
+      simDt,
+      this.orbs,
+      this.entities,
+      this.save.upgrades.orevalue,
+      this.save.upgrades.orbsize,
+      this.save.prestigeLevel,
+      this.save.ascensionTier
+    );
+
+    // Track deepest orb & generate chunks ahead
+    let lowestY = 0;
+    let anyAlive = false;
+    for (const orb of this.orbs) {
+      if (!orb.alive) continue;
+      anyAlive = true;
+      if (orb.y > lowestY) lowestY = orb.y;
+    }
+
+    if (anyAlive) {
+      const targetCamY = Math.max(0, lowestY - PHYSICS_CONFIG.CAMERA_LOOKAHEAD_Y);
+      this.cameraY += (targetCamY - this.cameraY) * Math.min(1, dt * 6);
+      const bottomRow = Math.ceil((this.cameraY + 1200) / PHYSICS_CONFIG.TILE_SIZE);
+      this.generator.ensureChunksUpToRow(bottomRow, this.entities);
+
+      const baseDepth = this.progression.getSelectedBiome(this.save).startDepthM;
+      const orbDepth = baseDepth + (lowestY / PHYSICS_CONFIG.TILE_SIZE) * PHYSICS_CONFIG.METERS_PER_ROW;
+      if (orbDepth > this.runMaxDepthM) {
+        this.runMaxDepthM = orbDepth;
+      }
+      if (orbDepth > this.save.maxDepthMeters) {
+        this.save.maxDepthMeters = orbDepth;
+      }
+    }
+
+    // Update coins (fountain pop -> smooth magnetic arc toward top-left coin HUD pill)
+    const magnetTargetX = 56;
+    const magnetTargetY = this.cameraY + 26;
+    for (let i = 0; i < this.coins.length; i++) {
+      const c = this.coins[i];
+      if (!c.alive) continue;
+      c.life -= dt;
+      if (c.life <= 0) {
+        c.alive = false;
+        continue;
+      }
+      if (c.magnetized && c.life <= 0.48) {
+        const dx = magnetTargetX - c.x;
+        const dy = magnetTargetY - c.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 22) {
+          c.alive = false;
+          this.particles.emitBurst(c.x, c.y, 2, '#fde047', 20, 60, 2.5, 0.16);
+          continue;
+        }
+        const pullT = Math.min(1, dt * 16);
+        const targetVx = (dx / dist) * 1150;
+        const targetVy = (dy / dist) * 1150;
+        c.vx += (targetVx - c.vx) * pullT;
+        c.vy += (targetVy - c.vy) * pullT;
+      } else {
+        c.vy += 520 * dt;
+      }
+      c.x += c.vx * dt;
+      c.y += c.vy * dt;
+    }
+
+    this.particles.update(simDt);
+    this.floatingText.update(simDt);
+    this.juice.update(simDt);
+
+    if (
+      (this.pendingVictoryTier !== null && this.victorySlowMoTimer <= 0) ||
+      (!anyAlive && this.pendingVolleyOrbs <= 0 && this.victorySlowMoTimer <= 0)
+    ) {
+      this.finishRun();
+    }
+  }
+
+  private finishRun(): void {
+    this.loop.setSpeedMultiplier(1);
+    PlatformSDK.gameplayStop();
+    this.save.runsCompleted += 1;
+    this.save.stats.runsCompleted += 1;
+    this.retention.recordQuestProgress(this.save, 'runsCompleted', 1);
+
+    this.save.recentRunEarnings.push(this.runCoins);
+    if (this.save.recentRunEarnings.length > 3) {
+      this.save.recentRunEarnings.shift();
+    }
+    const mins = Math.max(0.25, this.runElapsedS / 60);
+    this.save.recentRunCoinsPerMin = Math.max(40, Math.round(this.runCoins / mins));
+    this.save.lastActiveTimestamp = PlatformSDK.getServerTimeMs();
+
+    this.progression.checkMasteryFeats(this.save, {
+      blocksSmashed: this.runBlocksSmashed,
+      maxCombo: this.runMaxCombo,
+      tntChainMax: this.runTntCount,
+      maxDepthMeters: this.runMaxDepthM,
+      isFullShaftRun: this.isFullShaftRun,
+    });
+    this.skins.checkAndUnlockEligibleSkins(this.save);
+    this.persistSave();
+
+    if (this.pendingVictoryTier !== null) {
+      const victoryTier = this.pendingVictoryTier;
+      this.pendingVictoryTier = null;
+      this.stateMachine.transition('ASCENSION_VICTORY');
+      this.victoryModal.show({
+        newTier: victoryTier,
+        blocksSmashed: this.runBlocksSmashed,
+        maxCombo: this.runMaxCombo,
+        coinsEarned: this.runCoins,
+        onDescendNextTier: () => {
+          this.progression.selectBiome(this.save, 0);
+          this.persistSave();
+          this.resetShaft();
+          this.resumeToAiming();
+        },
+        onOpenUpgrades: () => {
+          this.openShop('upgrades', false);
+        },
+        onDoubleVictoryCoins: async () => {
+          const res = await this.monetization.showRewarded('rv_double_run');
+          if (res.rewarded) {
+            this.save.coins += this.runCoins;
+            this.save.totalCoinsEarned += this.runCoins;
+            this.persistSave();
+            return true;
+          }
+          this.showAdFailureToast(res.reason);
+          return false;
+        },
+      });
+      return;
+    }
+
+    this.stateMachine.transition('RUN_SUMMARY');
+
+    const hasCriticalTarget = this.entities.some(
+      (e) =>
+        e.alive &&
+        (e.kind === 'vault' || e.kind === 'boss_core') &&
+        e.hp / e.maxHp <= AD_CONFIG.RV_EXTRA_LAUNCH_HP_THRESHOLD
+    );
+    const showDouble = this.monetization.canOfferDoubleRun(this.save, this.runCoins);
+    if (showDouble) {
+      this.monetization.markDoubleRunOffered(this.save.runsCompleted);
+    }
+
+    const affordableCount = UPGRADES.filter((u) => this.economy.canAfford(this.save, u.id)).length;
+    const showSummary = () => {
+      this.summary.show({
+        coinsEarned: this.runCoins,
+        maxDepthMeters: this.runMaxDepthM,
+        isNewBest: this.runMaxDepthM > this.runStartBestDepthM && this.runMaxDepthM > 5,
+        affordableUpgradeCount: affordableCount,
+        showDoubleAd: showDouble,
+        showExtraLaunchAd: hasCriticalTarget,
+        clearedBiome6ViaElevator: this.clearedBiome6ThisRun && !this.isFullShaftRun,
+        currentAscensionTier: this.save.ascensionTier,
+        onRelaunch: () => this.prepareNextRun(),
+        onOpenShop: () => this.openShop(),
+        onStartZeroMeterRun: () => {
+          this.progression.selectBiome(this.save, 0);
+          this.persistSave();
+          this.resetShaft();
+          this.resumeToAiming();
+        },
+        onDoubleAd: async () => {
+          const res = await this.monetization.showRewarded('rv_double_run');
+          if (res.rewarded) {
+            this.save.coins += this.runCoins;
+            this.save.totalCoinsEarned += this.runCoins;
+            this.persistSave();
+            this.summary.hide();
+            this.prepareNextRun();
+          } else {
+            this.showAdFailureToast(res.reason);
+          }
+        },
+        onExtraLaunchAd: async () => {
+          const res = await this.monetization.showRewarded('rv_extra_launch');
+          if (res.rewarded) {
+            this.summary.hide();
+            this.cameraY = 0;
+            this.resumeToAiming();
+          } else {
+            this.showAdFailureToast(res.reason);
+          }
+        },
+      });
+    };
+
+    const unlockData = this.pendingBiomeUnlock;
+    this.pendingBiomeUnlock = null;
+    if (unlockData) {
+      const unlockedSpec = BIOMES[unlockData.biomeIndex];
+      if (unlockedSpec) {
+        this.retentionModals.showBiomeUnlockModal(
+          i18n.t(unlockedSpec.nameKey as TranslationKey),
+          unlockedSpec.coinMultiplier,
+          unlockData.unlockedSkinNames,
+          showSummary
+        );
+        return;
+      }
+    }
+    showSummary();
+  }
+
+  private async prepareNextRun(): Promise<void> {
+    if (this.monetization.canShowMidgameAd()) {
+      this.hud.showToast(i18n.t('short_break'), 500);
+      await new Promise((r) => setTimeout(r, AD_CONFIG.PRE_AD_CUE_S * 1000));
+      await this.monetization.tryShowMidgameAd();
+    }
+    this.resetShaft();
+    this.resumeToAiming();
+  }
+
+  private openShop(initialTab: 'upgrades' | 'skins' = 'upgrades', returnToTitle: boolean = false): void {
+    PlatformSDK.gameplayStop();
+    this.stateMachine.transition('SHOP');
+    const freeCandidate = this.monetization.canOfferFreeUpgrade(this.save.runsCompleted)
+      ? this.economy.getCheapestNearlyAffordableUpgrade(
+          this.save,
+          AD_CONFIG.RV_FREE_UPGRADE_MIN_GAP,
+          AD_CONFIG.RV_FREE_UPGRADE_MAX_GAP
+        )
+      : null;
+
+    const refresh = () => {
+      this.shop.render(
+        this.save,
+        this.economy,
+        this.skins,
+        this.progression,
+        freeCandidate,
+        shopCallbacks
+      );
+    };
+
+    const shopCallbacks = {
+      onBuyUpgrade: (id: UpgradeId) => {
+        if (this.economy.buyUpgrade(this.save, id)) {
+          this.audio.playUpgrade();
+          this.persistSave();
+          refresh();
+        }
+      },
+      onFreeUpgradeAd: async (id: UpgradeId) => {
+        const res = await this.monetization.showRewarded('rv_free_upgrade');
+        if (res.rewarded) {
+          this.monetization.markFreeUpgradeOffered(this.save.runsCompleted);
+          this.economy.grantFreeUpgrade(this.save, id);
+          this.audio.playUpgrade();
+          this.persistSave();
+          refresh();
+        } else {
+          this.showAdFailureToast(res.reason);
+        }
+      },
+      onEquipSkin: (skinId: string) => {
+        if (this.skins.equipSkin(this.save, skinId)) {
+          this.audio.playClick();
+          this.persistSave();
+          refresh();
+        }
+      },
+      onUnlockSkinCoins: (skinId: string) => {
+        if (this.skins.unlockWithCoins(this.save, skinId)) {
+          this.audio.playUpgrade();
+          this.persistSave();
+          refresh();
+        }
+      },
+      onUnlockSkinAd: async (skinId: string) => {
+        const res = await this.monetization.showRewarded('rv_skin_progress');
+        if (res.rewarded) {
+          this.skins.addRvProgress(this.save, skinId);
+          this.audio.playUpgrade();
+          this.persistSave();
+          refresh();
+        } else {
+          this.showAdFailureToast(res.reason);
+        }
+      },
+      onPrestige: () => {
+        if (this.progression.triggerPrestige(this.save)) {
+          this.audio.playUpgrade();
+          this.persistSave();
+          this.shop.close();
+          this.resetShaft();
+          this.stateMachine.transition('AIMING');
+        }
+      },
+      onClose: () => {
+        this.resetShaft();
+        if (returnToTitle) {
+          this.stateMachine.transition('TITLE');
+          this.showTitleScreen();
+        } else {
+          this.resumeToAiming();
+        }
+      },
+    };
+
+    this.shop.open(
+      this.save,
+      this.economy,
+      this.skins,
+      this.progression,
+      freeCandidate,
+      shopCallbacks,
+      initialTab
+    );
+  }
+
+  private openAchievements(fromTitle: boolean): void {
+    if (!fromTitle) {
+      PlatformSDK.gameplayStop();
+    }
+    this.stateMachine.transition('SHOP');
+    this.achievementsModal.open(
+      this.save,
+      (featId) => {
+        const reward = this.progression.claimMasteryFeat(this.save, featId);
+        if (reward > 0) {
+          this.audio.playUpgrade();
+          this.persistSave();
+        }
+      },
+      () => {
+        if (fromTitle) {
+          this.stateMachine.transition('TITLE');
+          this.showTitleScreen();
+        } else {
+          this.resumeToAiming();
+        }
+      }
+    );
+  }
+
+  private simulateFinalGateClear(oneShot: boolean): void {
+    this.titleOverlay.hideImmediate();
+    this.shop.close();
+    this.summary.hide();
+    this.victoryModal.hide();
+    this.achievementsModal.hide();
+    this.retentionModals.hide();
+
+    this.save.unlockedBiomeIndex = ASCENSION_CONFIG.FINAL_BIOME_INDEX;
+    this.progression.selectBiome(this.save, oneShot ? 0 : ASCENSION_CONFIG.FINAL_BIOME_INDEX);
+    this.isFullShaftRun = oneShot;
+    this.runMaxDepthM = ASCENSION_CONFIG.FINAL_GATE_DEPTH_M;
+    this.save.maxDepthMeters = Math.max(this.save.maxDepthMeters, this.runMaxDepthM);
+    this.runBlocksSmashed = Math.max(this.runBlocksSmashed, 145);
+    this.runMaxCombo = Math.max(this.runMaxCombo, 28);
+    this.save.stats.maxBounceCombo = Math.max(this.save.stats.maxBounceCombo, this.runMaxCombo);
+    this.runTntCount = Math.max(this.runTntCount, 4);
+
+    const simCoins = Math.max(this.runCoins, 2500);
+    this.runCoins = simCoins;
+    this.save.coins += simCoins;
+    this.save.totalCoinsEarned += simCoins;
+
+    const { ascended, newTier } = this.progression.completeFinalGateClear(
+      this.save,
+      oneShot,
+      {
+        blocksSmashed: this.runBlocksSmashed,
+        maxCombo: this.runMaxCombo,
+        timestamp: PlatformSDK.getServerTimeMs(),
+      }
+    );
+    this.clearedBiome6ThisRun = true;
+    this.victorySlowMoTimer = 0;
+    this.pendingVictoryTier = ascended ? newTier : null;
+    if (ascended) {
+      this.audio.playVictoryFanfare();
+      PlatformSDK.happytime();
+    }
+    this.orbs.length = 0;
+    this.pendingVolleyOrbs = 0;
+    this.finishRun();
+  }
+
+  private showTitleScreen(): void {
+    this.ftue.setVisible(false);
+    this.titleOverlay.show({
+      logoUrl: this.renderer.getLogoEmblemUrl(),
+      bestDepthMeters: this.save.maxDepthMeters,
+      ascensionTier: this.save.ascensionTier,
+      hasUnclaimedFeats: this.progression.hasUnclaimedFeats(this.save),
+      muted: this.audio.isMuted(),
+      callbacks: {
+        onUserGesture: () => {
+          this.audio.unlock();
+        },
+        onPlay: () => {
+          this.audio.unlock();
+          this.stateMachine.transition('AIMING');
+          this.ftue.setVisible(!this.save.ftueDone);
+          if (!this.hasStartedGameplayOnce) {
+            this.hasStartedGameplayOnce = true;
+          }
+          PlatformSDK.gameplayStart();
+        },
+        onToggleMute: () => {
+          this.audio.unlock();
+          this.save.settings.muted = this.audio.toggleMute();
+          this.persistSave();
+          this.showTitleScreen();
+        },
+        onOpenSettings: () => {
+          this.openSettings(true);
+        },
+        onOpenSkins: () => {
+          this.titleOverlay.hideImmediate();
+          this.openShop('skins', true);
+        },
+        onOpenAchievements: () => {
+          this.titleOverlay.hideImmediate();
+          this.openAchievements(true);
+        },
+      },
+    });
+  }
+
+  private openSettings(fromTitle: boolean): void {
+    this.settingsModal.open(this.save, i18n.getLocale(), {
+      onToggleSfx: () => {
+        this.save.settings.sfxMuted = !this.save.settings.sfxMuted;
+        this.audio.setSfxMuted(this.save.settings.sfxMuted);
+        this.persistSave();
+      },
+      onToggleMusic: () => {
+        this.audio.unlock();
+        this.save.settings.musicMuted = !this.save.settings.musicMuted;
+        this.audio.setMusicMuted(this.save.settings.musicMuted);
+        this.save.settings.musicVolume = this.audio.getMusicVolume();
+        this.persistSave();
+      },
+      onSetMusicVolume: (level) => {
+        this.audio.unlock();
+        this.save.settings.musicVolume = level;
+        this.save.settings.musicMuted = level === 'off';
+        this.audio.setMusicVolume(level);
+        this.persistSave();
+      },
+      onToggleAimMode: () => {
+        this.save.settings.aimMode =
+          this.save.settings.aimMode === 'slingshot' ? 'direct' : 'slingshot';
+        this.save.settings.aimModeUserSet = true;
+        this.persistSave();
+      },
+      onSelectLocale: (locale: SupportedLocale) => {
+        this.save.settings.localeOverride = locale;
+        i18n.setLocale(locale);
+        this.hud.refreshLabels();
+        this.ftue.refreshText();
+        this.persistSave();
+      },
+      onConfirmReset: () => {
+        this.save = this.saveManager.resetProgress(PlatformSDK.getServerTimeMs());
+        const json = JSON.stringify(this.save);
+        void PlatformSDK.saveCloudData(json);
+        this.audio.setUserMuted(false);
+        this.audio.setSfxMuted(false);
+        this.audio.setMusicVolume('high');
+        this.save.settings.aimMode = this.getDefaultAimModeForDevice();
+        this.save.settings.aimModeUserSet = false;
+        i18n.setLocale(PlatformSDK.getLocale());
+        this.hud.refreshLabels();
+        this.ftue.refreshText();
+        this.returnToHome();
+      },
+      onClose: () => {
+        if (fromTitle) {
+          this.showTitleScreen();
+        } else {
+          this.resumeToAiming();
+        }
+      },
+    });
+  }
+
+  private returnToHome(): void {
+    PlatformSDK.gameplayStop();
+    this.pausedFromState = null;
+    this.orbs = [];
+    this.pendingVolleyOrbs = 0;
+    this.resetShaft();
+    this.stateMachine.transition('TITLE');
+    this.showTitleScreen();
+  }
+
+  private render(rawDt: number): void {
+    const selectedBiome = this.progression.getSelectedBiome(this.save);
+    const viewDepth =
+      selectedBiome.startDepthM +
+      (this.cameraY / PHYSICS_CONFIG.TILE_SIZE) * PHYSICS_CONFIG.METERS_PER_ROW;
+    const currentBiome = BiomeTheme.getBiomeAtDepth(viewDepth);
+
+    const activeBounces = this.orbs.reduce(
+      (sum, o) => (o.alive ? sum + o.bouncesLeft : sum),
+      0
+    );
+    const affordableCount = UPGRADES.filter((u) => this.economy.canAfford(this.save, u.id)).length;
+    const hasClaimableQuest = this.save.dailyQuests.quests.some(
+      (q) => !q.claimed && q.progress >= q.target
+    );
+
+    const currentDepth = this.stateMachine.state === 'RUNNING' ? this.runMaxDepthM : selectedBiome.startDepthM;
+    const bossStart = selectedBiome.startDepthM;
+    const bossEnd = Number.isFinite(selectedBiome.endDepthM)
+      ? selectedBiome.endDepthM
+      : ASCENSION_CONFIG.FINAL_GATE_DEPTH_M;
+    const bossSpan = Math.max(1, bossEnd - bossStart);
+    const bossPct = ((currentDepth - bossStart) / bossSpan) * 100;
+    const bossNear = bossEnd - currentDepth <= 15;
+    const nextBiomeNum = Math.min(6, selectedBiome.index + 2);
+    const bossText =
+      selectedBiome.index >= ASCENSION_CONFIG.FINAL_BIOME_INDEX
+        ? `${Math.floor(currentDepth)}m / ${ASCENSION_CONFIG.FINAL_GATE_DEPTH_M}m (${i18n.t('boss_gate')})`
+        : `${Math.floor(currentDepth)}m / ${Math.floor(bossEnd)}m to Biome ${nextBiomeNum} Boss`;
+
+    // Check if current biome's Bedrock Boss Gate is visible or damaged to display active Boss HP bar
+    const viewHeightWorld = this.viewport.getLayout().cssHeight / this.viewport.getLayout().scale;
+    let gateRow = -1;
+    let gateCoresAlive = 0;
+    let gateHp = 0;
+    let gateMaxHp = 0;
+    for (let i = 0; i < this.entities.length; i++) {
+      const e = this.entities[i];
+      if (e.kind === 'boss_core' && e.biomeIndex === selectedBiome.index) {
+        if (gateRow === -1) gateRow = e.row;
+        if (e.row === gateRow) {
+          gateMaxHp += e.maxHp;
+          if (e.alive) {
+            gateCoresAlive++;
+            gateHp += e.hp;
+          }
+        }
+      }
+    }
+    const gateY = gateRow * PHYSICS_CONFIG.TILE_SIZE;
+    const gateVisibleOrDamaged =
+      gateRow >= 0 &&
+      gateCoresAlive > 0 &&
+      (gateHp < gateMaxHp - 0.5 ||
+        (gateY >= this.cameraY - 40 && gateY <= this.cameraY + viewHeightWorld + 60));
+    this.bossActiveForAudio = bossNear || gateVisibleOrDamaged;
+
+    this.hud.update({
+      coins: this.save.coins,
+      depthMeters: currentDepth,
+      biomeName: i18n.t(currentBiome.nameKey as TranslationKey),
+      bouncesLeft: activeBounces,
+      isTitle: this.stateMachine.state === 'TITLE',
+      isRunning: this.stateMachine.state === 'RUNNING',
+      isAiming: this.stateMachine.state === 'AIMING',
+      muted: this.audio.isMuted(),
+      speedMult: this.loop.getSpeedMultiplier(),
+      hasElevator: this.save.unlockedBiomeIndex > 0,
+      showOverdriveOffer:
+        this.save.overdrivePasses === 0 &&
+        this.monetization.canOfferOverdriveTrial(this.save.runsCompleted),
+      hasClaimableLogin: !this.save.loginStreak.claimedToday,
+      hasClaimableQuest,
+      hasUnclaimedFeats: this.progression.hasUnclaimedFeats(this.save),
+      affordableUpgradeCount: affordableCount,
+      bossProgressText: bossText,
+      bossProgressPct: bossPct,
+      bossNear,
+      isFullShaftRun:
+        (this.stateMachine.state === 'RUNNING'
+          ? this.isFullShaftRun
+          : selectedBiome.startDepthM === 0) &&
+        this.stateMachine.state !== 'TITLE',
+      ascensionTier: this.save.ascensionTier,
+      activeGate: gateVisibleOrDamaged
+        ? { coresAlive: gateCoresAlive, hp: gateHp, maxHp: gateMaxHp }
+        : null,
+    });
+
+    this.renderer.render(this.viewport.getLayout(), {
+      cameraY: this.cameraY,
+      baseDepthMeters: selectedBiome.startDepthM,
+      launcherX: PHYSICS_CONFIG.SHAFT_WIDTH * 0.5,
+      launcherY: PHYSICS_CONFIG.LAUNCHER_Y,
+      aimAngleRad: this.stateMachine.state === 'AIMING' ? this.aimAngleRad : null,
+      isAimingState: this.stateMachine.state === 'AIMING',
+      loadedOrbRadius: this.economy.getEffectiveOrbRadius(this.save),
+      turretRecoil: this.turretRecoil,
+      trajectoryDots: this.trajectoryDots,
+      trajectoryImpact: this.trajectoryImpact,
+      trajectorySecondImpact: this.trajectorySecondImpact,
+      trajectoryBounceIdx: this.trajectoryBounceIdx,
+      aimFeedback: this.aimFeedback,
+      orbs: this.orbs,
+      entities: this.entities,
+      coins: this.coins,
+      skin: this.skins.getEquippedSkin(this.save),
+      particles: this.particles,
+      floatingText: this.floatingText,
+      juice: this.juice,
+      timeS: this.timeS + rawDt,
+    });
+  }
+
+  private getDefaultAimModeForDevice(): 'slingshot' | 'direct' {
+    const dev = PlatformSDK.getDeviceType();
+    if (dev === 'mobile' || dev === 'tablet') return 'slingshot';
+    if (
+      typeof window !== 'undefined' &&
+      typeof navigator !== 'undefined' &&
+      navigator.maxTouchPoints > 0 &&
+      window.innerWidth < 900
+    ) {
+      return 'slingshot';
+    }
+    return 'direct';
+  }
+
+  private resumeToAiming(): void {
+    this.stateMachine.transition('AIMING');
+    if (this.hasStartedGameplayOnce) {
+      PlatformSDK.gameplayStart();
+    }
+  }
+
+  private togglePause(): void {
+    const st = this.stateMachine.state;
+    if (st === 'PAUSED') {
+      this.retentionModals.hide();
+      const target = this.pausedFromState ?? 'AIMING';
+      this.pausedFromState = null;
+      this.stateMachine.transition(target);
+      if (this.hasStartedGameplayOnce) {
+        PlatformSDK.gameplayStart();
+      }
+      return;
+    }
+    if (st !== 'AIMING' && st !== 'RUNNING') return;
+    this.pausedFromState = st;
+    this.stateMachine.transition('PAUSED');
+    PlatformSDK.gameplayStop();
+    this.retentionModals.showPauseModal(
+      () => this.togglePause(),
+      () => {
+        this.pausedFromState = null;
+        this.resetShaft();
+        this.resumeToAiming();
+      },
+      () => {
+        this.pausedFromState = null;
+        this.openSettings(false);
+      },
+      () => this.returnToHome()
+    );
+  }
+
+  private showAdFailureToast(reason?: string): void {
+    // Poki prohibits custom ad-blocker error popups
+    if (typeof __PLATFORM__ !== 'undefined' && __PLATFORM__ === 'poki') return;
+    this.hud.showToast(reason === 'skipped' ? i18n.t('ad_incomplete') : i18n.t('ad_unavailable'));
+  }
+
+  private persistSave(): void {
+    const json = this.saveManager.saveLocal(this.save);
+    void PlatformSDK.saveCloudData(json);
+  }
+}
+
+const app = new RicochetMinerApp();
+void app.boot();

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.playwright-mcp/
+marketing-assets/.tmp-video/
+*.log
+.DS_Store
+Thumbs.db
