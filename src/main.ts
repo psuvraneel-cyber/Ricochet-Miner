@@ -113,6 +113,7 @@ class RicochetMinerApp {
   private victorySlowMoTimer = 0;
   private pendingVictoryTier: number | null = null;
   private hasStartedGameplayOnce = false;
+  private skipNextMidgameBreak = false;
   private pausedFromState: 'AIMING' | 'RUNNING' | null = null;
   private bossActiveForAudio = false;
   private pendingBiomeUnlock: { biomeIndex: number; unlockedSkinNames: string[] } | null = null;
@@ -147,6 +148,7 @@ class RicochetMinerApp {
   }
 
   async boot(): Promise<void> {
+    await PlatformSDK.init();
     PlatformSDK.loadingStart();
     const nowMs = PlatformSDK.getServerTimeMs();
     const localSave = this.saveManager.loadLocal(nowMs);
@@ -225,9 +227,15 @@ class RicochetMinerApp {
       },
     });
 
-    this.stateMachine.transition('TITLE');
-    this.showTitleScreen();
+    this.stateMachine.transition('AIMING');
+    this.titleOverlay.hideImmediate();
+    this.titleOverlay.showFloatingIntroBanner(this.renderer.getLogoEmblemUrl());
+    this.ftue.setAimMode(this.save.settings.aimMode);
+    this.ftue.updateLayout(this.viewport.getLayout());
+    this.ftue.setVisible(!this.save.ftueDone);
+    this.hasStartedGameplayOnce = true;
     PlatformSDK.loadingStop();
+    PlatformSDK.gameplayStart();
     this.loop.start();
 
     // Offline Idle Drill check
@@ -253,6 +261,9 @@ class RicochetMinerApp {
   private setupUI(): void {
     this.ftue = new FTUEOverlay(this.uiRoot);
     this.ftue.setVisible(false);
+    this.viewport.onResize((layout) => {
+      this.ftue.updateLayout(layout);
+    });
 
     this.shop = new ShopOverlay(this.uiRoot);
     this.summary = new RunSummaryModal(this.uiRoot);
@@ -274,7 +285,17 @@ class RicochetMinerApp {
       },
       onRecall: () => {
         for (const orb of this.orbs) {
-          orb.alive = false;
+          if (orb.alive) {
+            this.particles.emitSparks(orb.x, orb.y, 10, '#fde047');
+            orb.alive = false;
+          }
+        }
+        for (let i = 0; i < this.coins.length; i++) {
+          const c = this.coins[i];
+          if (c.alive) {
+            c.magnetized = true;
+            c.life = Math.min(c.life, 0.45);
+          }
         }
         this.pendingVolleyOrbs = 0;
       },
@@ -380,6 +401,7 @@ class RicochetMinerApp {
       clientToWorld: (cx, cy) => this.viewport.clientToWorld(cx, cy, this.cameraY),
       onAimStart: () => {
         this.audio.unlock();
+        this.titleOverlay.dismissFloatingIntroBanner();
         if (!this.hasStartedGameplayOnce) {
           this.hasStartedGameplayOnce = true;
           PlatformSDK.gameplayStart();
@@ -459,8 +481,8 @@ class RicochetMinerApp {
   private setupPhysicsEvents(): void {
     this.physics.setEvents({
       onWallHit: (orb, x, y) => {
-        this.audio.playWallHit(Math.hypot(orb.vx, orb.vy));
-        this.particles.emitBurst(x, y, 4, '#38bdf8', 50, 140, 3, 0.25);
+        this.audio.playWallHit(Math.hypot(orb.vx, orb.vy), x);
+        this.particles.emitSparks(x, y, 5, '#38bdf8');
       },
       onBlockHit: (orb, block, _dmg, cleaved) => {
         const cx = block.x + block.width * 0.5;
@@ -469,9 +491,14 @@ class RicochetMinerApp {
           orb.comboCount,
           cleaved,
           block.kind === 'granite' || block.kind === 'boss_armor',
-          Math.hypot(orb.vx, orb.vy)
+          Math.hypot(orb.vx, orb.vy),
+          cx
         );
-        this.particles.emitBurst(cx, cy, cleaved ? 8 : 5, '#e2e8f0', 70, 200, 3.5, 0.3);
+        if (cleaved) {
+          this.particles.emitSparks(cx, cy, 10, '#fde047');
+        } else {
+          this.particles.emitRockShards(cx, cy, 6, block.kind === 'frost' ? '#bae6fd' : '#e2e8f0');
+        }
         this.juice.triggerShake(cleaved ? 3.5 : 1.8);
         if (cleaved) {
           this.floatingText.spawn(cx, cy - 12, 'CLEAVE!', '#38bdf8', 1.05);
@@ -493,7 +520,14 @@ class RicochetMinerApp {
         this.save.stats.blocksDestroyed += 1;
         this.retention.recordQuestProgress(this.save, 'blocksDestroyed', 1);
         if (!isTnt) {
-          this.audio.playCrunch(block.kind === 'granite');
+          this.audio.playCrunch(block.kind === 'granite', cx);
+          this.particles.emitRockShards(
+            cx,
+            cy,
+            8,
+            block.kind === 'ore' ? '#fbbf24' : block.kind === 'frost' ? '#7dd3fc' : '#cbd5e1'
+          );
+          this.particles.emitSmokePuff(cx, cy, 3, '#64748b');
         }
 
         if (isTnt) {
@@ -512,13 +546,13 @@ class RicochetMinerApp {
         }
 
         if (coins > 0) {
-          this.audio.playCoin();
+          this.audio.playCoin(cx);
           this.floatingText.spawn(cx, cy, `+${formatCompact(coins)}`, '#fbbf24', 1);
           this.spawnCoinDrop(cx, cy, coins);
         }
       },
       onTntExplode: (x, y, radius) => {
-        this.audio.playExplosion();
+        this.audio.playExplosion(x);
         if (this.runTntCount >= 2) {
           this.audio.duck(500);
         }
@@ -526,22 +560,24 @@ class RicochetMinerApp {
         this.juice.triggerShake(7.5);
         this.juice.triggerVignette(0.35);
         this.juice.addShockwave(x, y, radius, '#fb923c');
-        this.particles.emitBurst(x, y, 22, '#fb923c', 120, 380, 5, 0.45);
+        this.particles.emitSparks(x, y, 16, '#fde047');
+        this.particles.emitRockShards(x, y, 10, '#fb923c');
+        this.particles.emitSmokePuff(x, y, 6, '#334155');
       },
       onBumperHit: (orb, bumper, coins) => {
         const cx = bumper.x + bumper.width * 0.5;
         const cy = bumper.y + bumper.height * 0.5;
-        this.audio.playBumper(orb.comboCount);
+        this.audio.playBumper(orb.comboCount, cx);
         this.save.stats.bumpersHit += 1;
         this.retention.recordQuestProgress(this.save, 'bumpersHit', 1);
         this.runCoins += coins;
         this.save.coins += coins;
         this.save.totalCoinsEarned += coins;
         this.floatingText.spawn(cx, cy - 10, '+2 BOUNCE', '#22d3ee', 1.1);
-        this.particles.emitBurst(cx, cy, 8, '#e879f9', 80, 220, 4, 0.3);
+        this.particles.emitSparks(cx, cy, 10, '#e879f9');
       },
       onLaserFire: (rowY) => {
-        this.audio.playExplosion();
+        this.audio.playExplosion(PHYSICS_CONFIG.SHAFT_WIDTH * 0.5);
         this.juice.addLaserBeam(rowY, '#fef08a');
         this.juice.triggerShake(4.5);
       },
@@ -882,10 +918,14 @@ class RicochetMinerApp {
         (e.kind === 'vault' || e.kind === 'boss_core') &&
         e.hp / e.maxHp <= AD_CONFIG.RV_EXTRA_LAUNCH_HP_THRESHOLD
     );
-    const showDouble = this.monetization.canOfferDoubleRun(this.save, this.runCoins);
+    const showDouble =
+      PlatformSDK.canShowRewardedAds() &&
+      this.monetization.canOfferDoubleRun(this.save, this.runCoins);
     if (showDouble) {
       this.monetization.markDoubleRunOffered(this.save.runsCompleted);
     }
+    this.skipNextMidgameBreak =
+      !PlatformSDK.canShowRewardedAds() || showDouble || hasCriticalTarget;
 
     const affordableCount = UPGRADES.filter((u) => this.economy.canAfford(this.save, u.id)).length;
     const showSummary = () => {
@@ -949,7 +989,13 @@ class RicochetMinerApp {
   }
 
   private async prepareNextRun(): Promise<void> {
-    if (this.monetization.canShowMidgameAd()) {
+    PlatformSDK.clearAllBanners();
+    const shouldTryMidgame =
+      !this.skipNextMidgameBreak &&
+      PlatformSDK.canShowRewardedAds() &&
+      this.monetization.canShowMidgameAd();
+    this.skipNextMidgameBreak = false;
+    if (shouldTryMidgame) {
       this.hud.showToast(i18n.t('short_break'), 500);
       await new Promise((r) => setTimeout(r, AD_CONFIG.PRE_AD_CUE_S * 1000));
       await this.monetization.tryShowMidgameAd();
@@ -959,6 +1005,7 @@ class RicochetMinerApp {
   }
 
   private openShop(initialTab: 'upgrades' | 'skins' = 'upgrades', returnToTitle: boolean = false): void {
+    this.titleOverlay.dismissFloatingIntroBanner();
     PlatformSDK.gameplayStop();
     this.stateMachine.transition('SHOP');
     const freeCandidate = this.monetization.canOfferFreeUpgrade(this.save.runsCompleted)
@@ -1192,6 +1239,7 @@ class RicochetMinerApp {
         this.save.settings.aimMode =
           this.save.settings.aimMode === 'slingshot' ? 'direct' : 'slingshot';
         this.save.settings.aimModeUserSet = true;
+        this.ftue.setAimMode(this.save.settings.aimMode);
         this.persistSave();
       },
       onSelectLocale: (locale: SupportedLocale) => {
@@ -1210,9 +1258,11 @@ class RicochetMinerApp {
         this.audio.setMusicVolume('high');
         this.save.settings.aimMode = this.getDefaultAimModeForDevice();
         this.save.settings.aimModeUserSet = false;
+        this.ftue.setAimMode(this.save.settings.aimMode);
         i18n.setLocale(PlatformSDK.getLocale());
         this.hud.refreshLabels();
         this.ftue.refreshText();
+        this.ftue.setVisible(true);
         this.returnToHome();
       },
       onClose: () => {
@@ -1352,18 +1402,11 @@ class RicochetMinerApp {
   private getDefaultAimModeForDevice(): 'slingshot' | 'direct' {
     const dev = PlatformSDK.getDeviceType();
     if (dev === 'mobile' || dev === 'tablet') return 'slingshot';
-    if (
-      typeof window !== 'undefined' &&
-      typeof navigator !== 'undefined' &&
-      navigator.maxTouchPoints > 0 &&
-      window.innerWidth < 900
-    ) {
-      return 'slingshot';
-    }
     return 'direct';
   }
 
   private resumeToAiming(): void {
+    PlatformSDK.clearAllBanners();
     this.stateMachine.transition('AIMING');
     if (this.hasStartedGameplayOnce) {
       PlatformSDK.gameplayStart();

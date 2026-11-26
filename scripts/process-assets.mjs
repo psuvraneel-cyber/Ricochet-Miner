@@ -104,6 +104,122 @@ function chromaKeyMagenta(data, width, height, options = {}) {
 }
 
 /**
+ * Removes #00FF00 chroma-key green background strictly via BFS flood-fill starting from
+ * the outer borders of each cell, keeping enclosed green details (e.g. Vault chest emeralds)
+ * 100% opaque while smoothly feathering and de-spilling exterior boundary edges.
+ */
+function chromaKeyGreenFloodFill(data, width, height) {
+  const out = Buffer.from(data);
+  const total = width * height;
+  const visited = new Uint8Array(total);
+  const isBg = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  let head = 0;
+  let tail = 0;
+
+  const isChromaGreen = (pixelIdx) => {
+    const idx = pixelIdx * 4;
+    const a = out[idx + 3];
+    if (a === 0) return true;
+    const r = out[idx];
+    const g = out[idx + 1];
+    const b = out[idx + 2];
+    const maxRB = Math.max(r, b);
+    const greenNess = g - maxRB;
+    return g > 115 && greenNess > 28 && maxRB < 190;
+  };
+
+  const enqueue = (px) => {
+    if (px < 0 || px >= total || visited[px]) return;
+    if (!isChromaGreen(px)) return;
+    visited[px] = 1;
+    queue[tail++] = px;
+  };
+
+  // Seed flood-fill from all 4 outer perimeter borders of the cell
+  for (let x = 0; x < width; x++) {
+    enqueue(x);
+    enqueue((height - 1) * width + x);
+  }
+  for (let y = 1; y < height - 1; y++) {
+    enqueue(y * width);
+    enqueue(y * width + (width - 1));
+  }
+
+  while (head < tail) {
+    const curr = queue[head++];
+    isBg[curr] = 1;
+    const cx = curr % width;
+    const cy = (curr - cx) / width;
+    if (cx > 0) enqueue(curr - 1);
+    if (cx < width - 1) enqueue(curr + 1);
+    if (cy > 0) enqueue(curr - width);
+    if (cy < height - 1) enqueue(curr + width);
+  }
+
+  // Pass 1: Clear verified exterior chroma-green pixels cleanly, feather edge pixels
+  for (let i = 0; i < total; i++) {
+    if (!isBg[i]) continue;
+    const idx = i * 4;
+    const r = out[idx];
+    const g = out[idx + 1];
+    const b = out[idx + 2];
+    const maxRB = Math.max(r, b);
+    const greenNess = g - maxRB;
+    if (greenNess >= 70 && g > 140) {
+      out[idx + 3] = 0;
+    } else {
+      const factor = Math.max(0, Math.min(1, (70 - greenNess) / 42));
+      out[idx + 3] = clampByte(out[idx + 3] * factor * 0.45);
+    }
+  }
+
+  // Pass 2: 2px boundary spill suppression ONLY around pixels bordering cleared exterior BG
+  const alphaCopy = new Uint8Array(total);
+  for (let i = 0; i < total; i++) {
+    alphaCopy[i] = out[i * 4 + 3];
+  }
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      const idx = i * 4;
+      const a = alphaCopy[i];
+      if (a === 0) continue;
+
+      let nearClearedExterior = isBg[i] || a < 245;
+      if (!nearClearedExterior) {
+        for (let dy = -2; dy <= 2 && !nearClearedExterior; dy++) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= height) continue;
+          for (let dx = -2; dx <= 2; dx++) {
+            const nx = x + dx;
+            if (nx < 0 || nx >= width) continue;
+            const ni = ny * width + nx;
+            if (isBg[ni] || alphaCopy[ni] < 180) {
+              nearClearedExterior = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if (nearClearedExterior) {
+        const r = out[idx];
+        const g = out[idx + 1];
+        const b = out[idx + 2];
+        const maxRB = Math.max(r, b);
+        if (g > maxRB + 4) {
+          out[idx + 1] = Math.min(g, maxRB + 2);
+        }
+      }
+    }
+  }
+
+  return out;
+}
+
+/**
  * Finds tight non-transparent bounding box of an RGBA buffer.
  */
 function findTightBounds(data, width, height, alphaThreshold = 12) {
@@ -170,6 +286,7 @@ async function processSheetCell({
   squareCenterPad = false,
   mirrorBottomRightCorner = false,
   maskSheetCorner = true,
+  chromaMode = 'magenta',
 }) {
   const cellW = Math.floor(sheetW / cols);
   const cellH = Math.floor(sheetH / rows);
@@ -186,9 +303,27 @@ async function processSheetCell({
     .toBuffer({ resolveWithObject: true });
 
   const isBottomRightCell = col === cols - 1 && row === rows - 1;
-  const keyed = chromaKeyMagenta(cellData, info.width, info.height, {
-    maskBottomRightPct: isBottomRightCell && maskSheetCorner ? 0.06 : 0,
-  });
+  let prepData = cellData;
+  if (isBottomRightCell && maskSheetCorner && chromaMode === 'green') {
+    prepData = Buffer.from(cellData);
+    const maskStartX = Math.floor(info.width * 0.86);
+    const maskStartY = Math.floor(info.height * 0.86);
+    for (let y = maskStartY; y < info.height; y++) {
+      for (let x = maskStartX; x < info.width; x++) {
+        const p = (y * info.width + x) * 4;
+        prepData[p] = 0;
+        prepData[p + 1] = 255;
+        prepData[p + 2] = 0;
+        prepData[p + 3] = 255;
+      }
+    }
+  }
+  const keyed =
+    chromaMode === 'green'
+      ? chromaKeyGreenFloodFill(prepData, info.width, info.height)
+      : chromaKeyMagenta(prepData, info.width, info.height, {
+          maskBottomRightPct: isBottomRightCell && maskSheetCorner ? 0.06 : 0,
+        });
 
   const bounds = findTightBounds(keyed, info.width, info.height);
   const { data: trimmedData, info: trimmedInfo } = await sharp(keyed, {
@@ -263,33 +398,45 @@ async function processSeamlessVerticalTexture({
     cropW = Math.floor(meta.width * 0.9);
   }
 
+  const overlap = Math.min(Math.floor(targetH * 0.2), Math.max(48, blendPx * 2));
   const { data, info } = await sharp(srcPath)
     .extract({ left, top: 0, width: cropW, height: cropH })
-    .resize(targetW, targetH, { fit: 'fill' })
+    .resize(targetW, targetH + overlap, { fit: 'fill' })
     .ensureAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
 
-  const out = Buffer.from(data);
   const w = info.width;
-  const h = info.height;
+  const h = targetH;
+  const out = Buffer.allocUnsafe(w * h * 4);
+  data.copy(out, 0, 0, w * h * 4);
 
-  // Crossfade top blendPx rows with bottom blendPx rows for seamless vertical repeat
-  for (let y = 0; y < blendPx; y++) {
-    const t = y / blendPx; // 0 at top edge, 1 at blendPx
-    const mirrorY = h - blendPx + y;
-    for (let x = 0; x < w; x++) {
-      const topIdx = (y * w + x) * 4;
-      const botIdx = (mirrorY * w + x) * 4;
+  // Seamlessly fold bottom overflow band [targetH .. targetH + overlap) into top [0 .. overlap)
+  // along a wavy rock-strata contour so edge (0) == neighbor of edge (h - 1) with zero visible cut line.
+  for (let x = 0; x < w; x++) {
+    const wave = Math.round(Math.sin((x / w) * Math.PI * 4) * 10 + Math.cos((x / w) * Math.PI * 8) * 5);
+    const colOverlap = Math.max(24, Math.min(overlap, overlap - 10 + wave));
+    for (let y = 0; y < colOverlap; y++) {
+      const t = 0.5 - 0.5 * Math.cos((Math.PI * y) / colOverlap); // Smooth 0 -> 1 cosine ease
+      const dstIdx = (y * w + x) * 4;
+      const tailY = Math.min(info.height - 1, h + y);
+      const tailIdx = (tailY * w + x) * 4;
       for (let c = 0; c < 4; c++) {
-        const blended = Math.round(out[botIdx + c] * (1 - t) + out[topIdx + c] * t);
-        out[topIdx + c] = blended;
+        out[dstIdx + c] = Math.round(data[tailIdx + c] * (1 - t) + out[dstIdx + c] * t);
       }
     }
   }
 
+  // Toroidal half-height offset shifts the healed zone cleanly into the middle of continuous strata
+  const shifted = Buffer.allocUnsafe(out.length);
+  const halfH = Math.floor(h / 2);
+  for (let y = 0; y < h; y++) {
+    const srcY = (y + halfH) % h;
+    out.copy(shifted, y * w * 4, srcY * w * 4, (srcY + 1) * w * 4);
+  }
+
   const outPath = path.join(OUT_DIR, outName);
-  await sharp(out, { raw: { width: w, height: h, channels: 4 } })
+  await sharp(shifted, { raw: { width: w, height: h, channels: 4 } })
     .webp(WEBP_OPTS)
     .toFile(outPath);
   const sizeKb = (fs.statSync(outPath).size / 1024).toFixed(1);
@@ -602,6 +749,61 @@ async function main() {
       maskSheetCorner: true,
       mirrorBottomRightCorner: isStar,
     });
+  }
+
+  // 9. entities_special_spritesheet.png (3x3 on #00FF00 chroma green -> exterior flood-fill keyed)
+  const specialRawPath = path.join(RAW_DIR, 'entities_special_spritesheet.png');
+  if (fs.existsSync(specialRawPath)) {
+    const specialRaw = await sharp(specialRawPath)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    // Mask outermost 6% bottom-right corner of the full sheet BEFORE slicing cell (2,2)
+    const fullW = specialRaw.info.width;
+    const fullH = specialRaw.info.height;
+    const cornerStartX = Math.floor(fullW * 0.94);
+    const cornerStartY = Math.floor(fullH * 0.94);
+    for (let y = cornerStartY; y < fullH; y++) {
+      for (let x = cornerStartX; x < fullW; x++) {
+        const p = (y * fullW + x) * 4;
+        specialRaw.data[p] = 0;
+        specialRaw.data[p + 1] = 255;
+        specialRaw.data[p + 2] = 0;
+        specialRaw.data[p + 3] = 255;
+      }
+    }
+
+    const specialMapping = [
+      [0, 0, 'block_vault.webp', false],
+      [1, 0, 'block_splitter.webp', false],
+      [2, 0, 'block_laser.webp', false],
+      [0, 1, 'block_boss_armor.webp', false],
+      [1, 1, 'prop_portal_entry.webp', true],
+      [2, 1, 'prop_portal_exit.webp', true],
+      [0, 2, 'pickup_split_gem.webp', true],
+      [1, 2, 'pickup_magnet_coil.webp', true],
+      [2, 2, 'pickup_overclock_battery.webp', true],
+    ];
+
+    for (const [col, row, outName, squareCenter] of specialMapping) {
+      await processSheetCell({
+        sheetBuf: specialRaw.data,
+        sheetW: specialRaw.info.width,
+        sheetH: specialRaw.info.height,
+        cols: 3,
+        rows: 3,
+        col,
+        row,
+        outName,
+        padding: 3,
+        targetW: 160,
+        targetH: 160,
+        squareCenterPad: squareCenter,
+        maskSheetCorner: false,
+        chromaMode: 'green',
+      });
+    }
   }
 
   console.log('Done processing all assets!');

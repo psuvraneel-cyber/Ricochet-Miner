@@ -25,6 +25,9 @@ export interface IPortalAdapter {
   showRewardedAd(placementId: string): Promise<AdResult>;
   requestBanner(containerId: string, size?: string): void;
   clearBanner(containerId: string): void;
+  clearAllBanners?(): void;
+  hasAdblock?(): Promise<boolean>;
+  isDisabled?(): boolean;
   saveCloudData(json: string): Promise<void>;
   loadCloudData(): Promise<string | null>;
   getLocale(): string;
@@ -37,9 +40,17 @@ export type AdLifecycleCallbacks = {
   onAfterAd: () => void;
 };
 
+const SDK_INIT_TIMEOUT_MS = 3000;
+
 export class PlatformSDKManager {
   private adapter: IPortalAdapter;
   private initialized = false;
+  private initPromise: Promise<void> | null = null;
+  private fallbackToOffline = false;
+  private rewardedAdsAvailable = true;
+  private sessionAdsBlocked = false;
+  private activeBannerIds = new Set<string>();
+  private adListeners = new Set<(available: boolean) => void>();
   private playstate: ActivePlaystate = 'IDLE';
   private lifecycle: AdLifecycleCallbacks = {
     onBeforeAd: () => {},
@@ -48,6 +59,7 @@ export class PlatformSDKManager {
 
   constructor(adapter?: IPortalAdapter) {
     this.adapter = adapter ?? this.createAdapter();
+    this.rewardedAdsAvailable = this.computeInitialAdSupport();
   }
 
   private createAdapter(): IPortalAdapter {
@@ -68,10 +80,23 @@ export class PlatformSDKManager {
     }
   }
 
+  private computeInitialAdSupport(): boolean {
+    if (this.fallbackToOffline || this.sessionAdsBlocked) return false;
+    if (this.adapter.name === 'standalone') return false;
+    if (this.adapter.isDisabled?.()) return false;
+    return true;
+  }
+
   setAdapterForTest(adapter: IPortalAdapter): void {
     this.adapter = adapter;
     this.initialized = false;
+    this.initPromise = null;
+    this.fallbackToOffline = false;
+    this.sessionAdsBlocked = false;
+    this.activeBannerIds.clear();
     this.playstate = 'IDLE';
+    this.rewardedAdsAvailable = this.computeInitialAdSupport();
+    this.emitAdAvailabilityChanged();
   }
 
   setAdLifecycleCallbacks(callbacks: AdLifecycleCallbacks): void {
@@ -94,47 +119,147 @@ export class PlatformSDKManager {
     return this.playstate === 'AD_PAUSED';
   }
 
+  get isOfflineFallback(): boolean {
+    return this.fallbackToOffline || Boolean(this.adapter.isDisabled?.());
+  }
+
   get supportsBanners(): boolean {
-    return this.adapter.supportsBanners;
+    return !this.isOfflineFallback && this.adapter.supportsBanners;
   }
 
   get hideFullscreenButton(): boolean {
     return this.adapter.hideFullscreenButton;
   }
 
-  async init(): Promise<void> {
+  canShowRewardedAds(): boolean {
+    return this.rewardedAdsAvailable && !this.isOfflineFallback && !this.sessionAdsBlocked;
+  }
+
+  canShowBanners(): boolean {
+    return this.supportsBanners && this.canShowRewardedAds();
+  }
+
+  onAdAvailabilityChange(cb: (available: boolean) => void): () => void {
+    this.adListeners.add(cb);
+    return () => {
+      this.adListeners.delete(cb);
+    };
+  }
+
+  private emitAdAvailabilityChanged(): void {
+    const avail = this.canShowRewardedAds();
+    for (const cb of this.adListeners) {
+      try {
+        cb(avail);
+      } catch {
+        // ignore listener failure
+      }
+    }
+    if (typeof window !== 'undefined' && typeof CustomEvent !== 'undefined') {
+      try {
+        window.dispatchEvent(new CustomEvent('ad-availability-changed', { detail: { available: avail } }));
+      } catch {
+        // ignore in mocked node windows
+      }
+    }
+  }
+
+  async init(timeoutMs: number = SDK_INIT_TIMEOUT_MS): Promise<void> {
     if (this.initialized) return;
-    this.initialized = true;
-    await this.adapter.init();
+    if (this.initPromise) return this.initPromise;
+
+    this.initPromise = (async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const result = await Promise.race<'ok' | 'timeout'>([
+          this.adapter.init().then(() => 'ok' as const),
+          new Promise<'timeout'>((resolve) => {
+            timer = setTimeout(() => resolve('timeout'), timeoutMs);
+          }),
+        ]);
+        if (result === 'timeout') {
+          console.warn(`[PlatformSDK] ${this.adapter.name} init timed out after ${timeoutMs}ms; activating offline fallback.`);
+          this.fallbackToOffline = true;
+        } else if (this.adapter.isDisabled?.()) {
+          this.fallbackToOffline = true;
+        }
+      } catch (err) {
+        console.warn(`[PlatformSDK] ${this.adapter.name} init failed; activating offline fallback.`, err);
+        this.fallbackToOffline = true;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+
+      this.initialized = true;
+      await this.refreshAdAvailability();
+    })();
+
+    return this.initPromise;
+  }
+
+  async refreshAdAvailability(): Promise<boolean> {
+    const prev = this.canShowRewardedAds();
+    if (this.isOfflineFallback || this.adapter.name === 'standalone' || this.sessionAdsBlocked) {
+      this.rewardedAdsAvailable = false;
+      if (prev !== this.canShowRewardedAds()) this.emitAdAvailabilityChanged();
+      return false;
+    }
+
+    let blocked = false;
+    try {
+      if (this.adapter.hasAdblock) {
+        blocked = await this.adapter.hasAdblock();
+      }
+    } catch {
+      blocked = false;
+    }
+
+    if (blocked) {
+      this.sessionAdsBlocked = true;
+      this.rewardedAdsAvailable = false;
+    } else {
+      this.rewardedAdsAvailable = true;
+    }
+
+    const next = this.canShowRewardedAds();
+    if (prev !== next) {
+      this.emitAdAvailabilityChanged();
+    }
+    return next;
   }
 
   loadingStart(): void {
+    if (this.isOfflineFallback) return;
     this.adapter.loadingStart();
   }
 
   loadingStop(): void {
+    if (this.isOfflineFallback) return;
     this.adapter.loadingStop();
   }
 
   gameplayStart(): void {
     if (this.playstate !== 'IDLE') return;
     this.playstate = 'GAMEPLAY';
+    if (this.isOfflineFallback) return;
     this.adapter.gameplayStart();
   }
 
   gameplayStop(): void {
     if (this.playstate !== 'GAMEPLAY') return;
     this.playstate = 'IDLE';
+    if (this.isOfflineFallback) return;
     this.adapter.gameplayStop();
   }
 
   happytime(): void {
-    if (this.playstate === 'AD_PAUSED') return;
+    if (this.playstate === 'AD_PAUSED' || this.isOfflineFallback) return;
     this.adapter.happytime();
   }
 
   async showMidgameAd(): Promise<AdResult> {
     if (this.playstate === 'AD_PAUSED') return { rewarded: false, reason: 'skipped' };
+    if (!this.canShowRewardedAds()) return { rewarded: false, reason: 'skipped' };
     this.gameplayStop();
     this.playstate = 'AD_PAUSED';
     this.lifecycle.onBeforeAd();
@@ -150,12 +275,22 @@ export class PlatformSDKManager {
 
   async showRewardedAd(placementId: string): Promise<AdResult> {
     if (this.playstate === 'AD_PAUSED') return { rewarded: false, reason: 'skipped' };
+    if (!this.canShowRewardedAds()) return { rewarded: false, reason: 'adblock' };
     this.gameplayStop();
     this.playstate = 'AD_PAUSED';
     this.lifecycle.onBeforeAd();
     try {
-      return await this.adapter.showRewardedAd(placementId);
+      const res = await this.adapter.showRewardedAd(placementId);
+      if (!res.rewarded && (res.reason === 'adblock' || res.reason === 'error')) {
+        this.sessionAdsBlocked = true;
+        this.rewardedAdsAvailable = false;
+        this.emitAdAvailabilityChanged();
+      }
+      return res;
     } catch {
+      this.sessionAdsBlocked = true;
+      this.rewardedAdsAvailable = false;
+      this.emitAdAvailabilityChanged();
       return { rewarded: false, reason: 'error' };
     } finally {
       this.playstate = 'IDLE';
@@ -164,20 +299,39 @@ export class PlatformSDKManager {
   }
 
   requestBanner(containerId: string, size?: string): void {
-    if (this.playstate === 'AD_PAUSED' || !this.adapter.supportsBanners) return;
+    if (this.playstate === 'AD_PAUSED' || !this.canShowBanners()) return;
+    this.activeBannerIds.add(containerId);
     this.adapter.requestBanner(containerId, size);
   }
 
   clearBanner(containerId: string): void {
-    if (this.playstate === 'AD_PAUSED' || !this.adapter.supportsBanners) return;
+    this.activeBannerIds.delete(containerId);
+    if (this.playstate === 'AD_PAUSED' || !this.supportsBanners) return;
     this.adapter.clearBanner(containerId);
   }
 
+  clearAllBanners(): void {
+    if (!this.supportsBanners) {
+      this.activeBannerIds.clear();
+      return;
+    }
+    if (this.adapter.clearAllBanners) {
+      this.adapter.clearAllBanners();
+    } else {
+      for (const id of this.activeBannerIds) {
+        this.adapter.clearBanner(id);
+      }
+    }
+    this.activeBannerIds.clear();
+  }
+
   async saveCloudData(json: string): Promise<void> {
+    if (this.isOfflineFallback) return;
     await this.adapter.saveCloudData(json);
   }
 
   async loadCloudData(): Promise<string | null> {
+    if (this.isOfflineFallback) return null;
     return await this.adapter.loadCloudData();
   }
 

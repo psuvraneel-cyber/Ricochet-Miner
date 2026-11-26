@@ -102,7 +102,7 @@ export class AchievementsModal {
               ? `<span class="rm-lv-pill" style="color:#4ade80;border-color:#4ade80;">${i18n.t('claimed')}</span>`
               : unlocked
               ? `<button class="rm-btn rm-btn-green" style="min-height:36px;padding:4px 9px;font-size:11px;" data-feat-claim="${f.id}">
-                  <img src="${UI_ICONS.oreValue}" style="width:14px;height:14px;object-fit:contain;" alt="" /> +${formatCompact(f.rewardCoins)}
+                  ${svgIcon('coin')} +${formatCompact(f.rewardCoins)}
                 </button>`
               : `<span class="rm-lv-pill">${formatCompact(f.rewardCoins)}</span>`
           }

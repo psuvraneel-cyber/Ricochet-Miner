@@ -98,7 +98,7 @@ export const PHYSICS_CONFIG = {
   CLEAVE_RATIO: 2,
   BUMPER_MAX_HITS: 5,
   BUMPER_BOUNCE_BONUS: 2,
-  MAX_ACTIVE_ORBS: 12,
+  MAX_ACTIVE_ORBS: 24,
   TRAJECTORY_DOTS: 14,
   CANCEL_DEADZONE_PX: 16,
   HORIZONTAL_TRAP_WALL_HITS: 4,
@@ -124,7 +124,7 @@ export const ENTITY_STATS: Record<
   splitter: { hpMult: 0.5, coinMult: 1.0 },
   laser: { hpMult: 1.1, coinMult: 1.5 },
   vault: { hpMult: 5.5, coinMult: 10.0 },
-  boss_core: { hpMult: 15.0, coinMult: 20.0 },
+  boss_core: { hpMult: 18.0, coinMult: 20.0 },
   boss_armor: { hpMult: Number.POSITIVE_INFINITY, coinMult: 0.2 },
   frost: { hpMult: 1.4, coinMult: 1.4 },
   portal_entry: { hpMult: Number.POSITIVE_INFINITY, coinMult: 0 },
@@ -239,7 +239,7 @@ export const BIOMES: readonly BiomeSpec[] = [
     nameKey: 'biome_crystal',
     startDepthM: 150,
     endDepthM: 350,
-    coinMultiplier: 4,
+    coinMultiplier: 2.7,
     palette: {
       bgTop: '#13112c',
       bgBottom: '#1e1642',
@@ -256,7 +256,7 @@ export const BIOMES: readonly BiomeSpec[] = [
     nameKey: 'biome_magma',
     startDepthM: 350,
     endDepthM: 600,
-    coinMultiplier: 16,
+    coinMultiplier: 7.2,
     palette: {
       bgTop: '#181214',
       bgBottom: '#2b130e',
@@ -273,7 +273,7 @@ export const BIOMES: readonly BiomeSpec[] = [
     nameKey: 'biome_subzero',
     startDepthM: 600,
     endDepthM: 900,
-    coinMultiplier: 75,
+    coinMultiplier: 20,
     palette: {
       bgTop: '#0b192c',
       bgBottom: '#102a43',
@@ -290,7 +290,7 @@ export const BIOMES: readonly BiomeSpec[] = [
     nameKey: 'biome_cyber',
     startDepthM: 900,
     endDepthM: 1300,
-    coinMultiplier: 240,
+    coinMultiplier: 48,
     palette: {
       bgTop: '#120a21',
       bgBottom: '#1b0f30',
@@ -307,7 +307,7 @@ export const BIOMES: readonly BiomeSpec[] = [
     nameKey: 'biome_quantum',
     startDepthM: 1300,
     endDepthM: Number.POSITIVE_INFINITY,
-    coinMultiplier: 1100,
+    coinMultiplier: 100,
     palette: {
       bgTop: '#05070e',
       bgBottom: '#111827',
@@ -326,8 +326,8 @@ export const UPGRADES: readonly UpgradeSpec[] = [
     nameKey: 'upg_damage',
     descKey: 'upg_damage_desc',
     baseCost: 25,
-    growthRate: 1.60,
-    maxLevel: 40,
+    growthRate: 1.54,
+    maxLevel: 38,
     icon: 'pickaxe',
   },
   {
@@ -335,17 +335,17 @@ export const UPGRADES: readonly UpgradeSpec[] = [
     nameKey: 'upg_bounces',
     descKey: 'upg_bounces_desc',
     baseCost: 35,
-    growthRate: 1.62,
-    maxLevel: 30,
+    growthRate: 1.52,
+    maxLevel: 28,
     icon: 'lightning',
   },
   {
     id: 'multiorb',
     nameKey: 'upg_multiorb',
     descKey: 'upg_multiorb_desc',
-    baseCost: 420,
-    growthRate: 1.92,
-    maxLevel: 6,
+    baseCost: 480,
+    growthRate: 2.08,
+    maxLevel: 8,
     icon: 'orb',
   },
   {
@@ -353,7 +353,7 @@ export const UPGRADES: readonly UpgradeSpec[] = [
     nameKey: 'upg_orbsize',
     descKey: 'upg_orbsize_desc',
     baseCost: 55,
-    growthRate: 1.64,
+    growthRate: 1.54,
     maxLevel: 20,
     icon: 'blast',
   },
@@ -362,7 +362,7 @@ export const UPGRADES: readonly UpgradeSpec[] = [
     nameKey: 'upg_luck',
     descKey: 'upg_luck_desc',
     baseCost: 65,
-    growthRate: 1.60,
+    growthRate: 1.52,
     maxLevel: 20,
     icon: 'clover',
   },
@@ -371,8 +371,8 @@ export const UPGRADES: readonly UpgradeSpec[] = [
     nameKey: 'upg_orevalue',
     descKey: 'upg_orevalue_desc',
     baseCost: 45,
-    growthRate: 1.70,
-    maxLevel: 35,
+    growthRate: 1.55,
+    maxLevel: 34,
     icon: 'coin',
   },
 ];
@@ -592,7 +592,7 @@ export function calcMaxBounces(level: number): number {
 }
 
 export function calcMultiOrbCount(level: number): number {
-  return Math.max(1, Math.min(6, Math.floor(level)));
+  return Math.max(1, Math.min(18, Math.floor(level)));
 }
 
 export function calcOrbRadius(level: number): number {

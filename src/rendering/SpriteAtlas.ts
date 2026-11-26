@@ -1,19 +1,28 @@
 import blockBedrockCoreUrl from '../assets/block_bedrock_core.webp';
+import blockBossArmorUrl from '../assets/block_boss_armor.webp';
 import blockFrostUrl from '../assets/block_frost.webp';
+import blockLaserUrl from '../assets/block_laser.webp';
 import blockOreGoldUrl from '../assets/block_ore_gold.webp';
 import blockOreMoltenUrl from '../assets/block_ore_molten.webp';
 import blockOreNuggetsUrl from '../assets/block_ore_nuggets.webp';
+import blockSplitterUrl from '../assets/block_splitter.webp';
 import blockStoneGraniteUrl from '../assets/block_stone_granite.webp';
 import blockStoneSandUrl from '../assets/block_stone_sand.webp';
 import blockStoneSlateUrl from '../assets/block_stone_slate.webp';
 import blockTntUrl from '../assets/block_tnt.webp';
+import blockVaultUrl from '../assets/block_vault.webp';
 import envRockFlankUrl from '../assets/env_rock_flank.webp';
 import envTimberBeamUrl from '../assets/env_timber_beam.webp';
 import logoEmblemUrl from '../assets/logo_emblem.webp';
+import pickupMagnetCoilUrl from '../assets/pickup_magnet_coil.webp';
+import pickupOverclockBatteryUrl from '../assets/pickup_overclock_battery.webp';
+import pickupSplitGemUrl from '../assets/pickup_split_gem.webp';
 import propBumperAmberUrl from '../assets/prop_bumper_amber.webp';
 import propBumperCyanUrl from '../assets/prop_bumper_cyan.webp';
 import propLanternUrl from '../assets/prop_lantern.webp';
 import propPortalUrl from '../assets/prop_portal.webp';
+import propPortalEntryUrl from '../assets/prop_portal_entry.webp';
+import propPortalExitUrl from '../assets/prop_portal_exit.webp';
 import propTurretUrl from '../assets/prop_turret.webp';
 import skinCopperGearUrl from '../assets/skin_copper_gear.webp';
 import skinEmeraldBuzzsawUrl from '../assets/skin_emerald_buzzsaw.webp';
@@ -41,13 +50,20 @@ const SKIN_URL_MAP: Record<string, string> = {
   void_reaper: skinVoidReaperUrl,
 };
 
-const BIOME_TINT_FILTERS: Record<number, string> = {
-  0: 'none',
-  1: 'hue-rotate(215deg) saturate(1.25) brightness(0.95)',
-  2: 'hue-rotate(-18deg) saturate(1.35) brightness(0.9)',
-  3: 'hue-rotate(175deg) saturate(1.1) brightness(1.05)',
-  4: 'hue-rotate(255deg) saturate(1.4) contrast(1.08)',
-  5: 'hue-rotate(30deg) saturate(1.25) brightness(1.08)',
+interface BiomeGradeSpec {
+  multiplyHex: string;
+  multiplyAlpha: number;
+  glowAlpha: number;
+}
+
+// Tasteful multi-pass biome grading (replaces harsh CSS hue-rotate saturation/yellow artifacts)
+const BIOME_GRADE_SPECS: Record<number, BiomeGradeSpec> = {
+  0: { multiplyHex: '#ffffff', multiplyAlpha: 0, glowAlpha: 0 },
+  1: { multiplyHex: '#4f6ef7', multiplyAlpha: 0.42, glowAlpha: 0.08 },
+  2: { multiplyHex: '#9a3412', multiplyAlpha: 0.36, glowAlpha: 0.08 },
+  3: { multiplyHex: '#38bdf8', multiplyAlpha: 0.48, glowAlpha: 0.1 },
+  4: { multiplyHex: '#7e22ce', multiplyAlpha: 0.46, glowAlpha: 0.09 },
+  5: { multiplyHex: '#334155', multiplyAlpha: 0.5, glowAlpha: 0.07 },
 };
 
 export class SpriteAtlas {
@@ -75,11 +91,20 @@ export class SpriteAtlas {
       ['tnt', blockTntUrl],
       ['frost', blockFrostUrl],
       ['bedrock_core', blockBedrockCoreUrl],
+      ['vault', blockVaultUrl],
+      ['splitter', blockSplitterUrl],
+      ['laser', blockLaserUrl],
+      ['boss_armor', blockBossArmorUrl],
       ['bumper_amber', propBumperAmberUrl],
       ['bumper_cyan', propBumperCyanUrl],
       ['turret', propTurretUrl],
       ['lantern', propLanternUrl],
       ['portal', propPortalUrl],
+      ['portal_entry', propPortalEntryUrl],
+      ['portal_exit', propPortalExitUrl],
+      ['pickup_split_gem', pickupSplitGemUrl],
+      ['pickup_magnet_coil', pickupMagnetCoilUrl],
+      ['pickup_overclock_battery', pickupOverclockBatteryUrl],
       ['timber_beam', envTimberBeamUrl],
       ['rock_flank', envRockFlankUrl],
       ['logo_emblem', logoEmblemUrl],
@@ -103,15 +128,18 @@ export class SpriteAtlas {
     this.loaded = true;
   }
 
-  getEnvTimberBeam(): DrawableImage | null {
-    return this.images.get('timber_beam') ?? null;
+  getEnvTimberBeam(biome?: BiomeSpec): DrawableImage | null {
+    const base = this.images.get('timber_beam');
+    if (!base) return null;
+    if (!biome || biome.index === 0) return base;
+    return this.getGraded(`beam:${biome.index}`, base, biome, 0.42, 0.04);
   }
 
   getEnvRockFlank(biome: BiomeSpec): DrawableImage | null {
     const base = this.images.get('rock_flank');
     if (!base) return null;
     if (biome.index === 0) return base;
-    return this.getTinted(`flank:${biome.index}`, base, BIOME_TINT_FILTERS[biome.index] ?? 'none', biome.palette.strataFill);
+    return this.getGraded(`flank:${biome.index}`, base, biome);
   }
 
   getPropTurret(): DrawableImage | null {
@@ -122,8 +150,18 @@ export class SpriteAtlas {
     return this.images.get('lantern') ?? null;
   }
 
-  getPropPortal(): DrawableImage | null {
+  getPropPortal(isEntry?: boolean): DrawableImage | null {
+    if (isEntry === true) {
+      return this.images.get('portal_entry') ?? this.images.get('portal') ?? null;
+    }
+    if (isEntry === false) {
+      return this.images.get('portal_exit') ?? this.images.get('portal') ?? null;
+    }
     return this.images.get('portal') ?? null;
+  }
+
+  getPickupSprite(kind: 'split_gem' | 'magnet_coil' | 'overclock_battery'): DrawableImage | null {
+    return this.images.get(`pickup_${kind}`) ?? null;
   }
 
   getPropBumper(isAmber: boolean): DrawableImage | null {
@@ -144,8 +182,11 @@ export class SpriteAtlas {
         baseKey = variant === 0 ? 'stone_slate' : variant === 1 ? 'stone_sand' : 'stone_granite';
         break;
       case 'granite':
-      case 'boss_armor':
         baseKey = 'stone_granite';
+        break;
+      case 'boss_armor':
+        baseKey = 'boss_armor';
+        allowBiomeTint = false;
         break;
       case 'ore':
         baseKey = variant === 0 ? 'ore_nuggets' : variant === 1 ? 'ore_gold' : 'ore_molten';
@@ -163,14 +204,15 @@ export class SpriteAtlas {
         allowBiomeTint = false;
         break;
       case 'splitter':
-        baseKey = 'frost';
+        baseKey = 'splitter';
+        allowBiomeTint = false;
         break;
       case 'laser':
-        baseKey = 'ore_molten';
+        baseKey = 'laser';
         allowBiomeTint = false;
         break;
       case 'vault':
-        baseKey = 'ore_gold';
+        baseKey = 'vault';
         allowBiomeTint = false;
         break;
       default:
@@ -181,21 +223,15 @@ export class SpriteAtlas {
     if (!base) return null;
     if (!allowBiomeTint || biome.index === 0) return base;
 
-    return this.getTinted(
-      `blk:${baseKey}:${biome.index}`,
-      base,
-      BIOME_TINT_FILTERS[biome.index] ?? 'none',
-      biome.palette.strataFill,
-      0.24
-    );
+    return this.getGraded(`blk:${baseKey}:${biome.index}`, base, biome);
   }
 
-  private getTinted(
+  private getGraded(
     cacheKey: string,
     img: HTMLImageElement,
-    cssFilter: string,
-    fallbackTintHex: string,
-    tintAlpha: number = 0.28
+    biome: BiomeSpec,
+    overrideMultiplyAlpha?: number,
+    overrideGlowAlpha?: number
   ): DrawableImage {
     const cached = this.tintedCache.get(cacheKey);
     if (cached) return cached;
@@ -211,19 +247,28 @@ export class SpriteAtlas {
     const ctx = c.getContext('2d');
     if (!ctx) return img;
 
-    if (cssFilter !== 'none' && 'filter' in ctx) {
-      ctx.filter = cssFilter;
-      ctx.drawImage(img, 0, 0, w, h);
-      ctx.filter = 'none';
-    } else {
-      ctx.drawImage(img, 0, 0, w, h);
-      ctx.globalCompositeOperation = 'source-atop';
-      ctx.fillStyle = fallbackTintHex;
-      ctx.globalAlpha = tintAlpha;
+    const grade = BIOME_GRADE_SPECS[biome.index] ?? BIOME_GRADE_SPECS[0];
+    const multAlpha = overrideMultiplyAlpha ?? grade.multiplyAlpha;
+    const glowAlpha = overrideGlowAlpha ?? grade.glowAlpha;
+
+    ctx.drawImage(img, 0, 0, w, h);
+    if (multAlpha > 0) {
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.globalAlpha = multAlpha;
+      ctx.fillStyle = grade.multiplyHex;
       ctx.fillRect(0, 0, w, h);
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.globalAlpha = 1;
     }
+    if (glowAlpha > 0) {
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = glowAlpha;
+      ctx.fillStyle = biome.palette.glow;
+      ctx.fillRect(0, 0, w, h);
+    }
+    // Preserve exact original silhouette & anti-aliased alpha edges
+    ctx.globalCompositeOperation = 'destination-in';
+    ctx.globalAlpha = 1;
+    ctx.drawImage(img, 0, 0, w, h);
+    ctx.globalCompositeOperation = 'source-over';
 
     this.tintedCache.set(cacheKey, c);
     return c;

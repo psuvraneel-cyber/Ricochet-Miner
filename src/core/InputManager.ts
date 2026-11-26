@@ -85,7 +85,8 @@ export class InputManager {
   };
 
   private onWheel = (e: WheelEvent): void => {
-    if (e.target === this.canvas) {
+    const target = e.target as HTMLElement | null;
+    if (!target || !target.closest('.rm-scroll-area')) {
       e.preventDefault();
     }
   };
@@ -261,10 +262,11 @@ export class InputManager {
   }
 
   private onKeyDown = (e: KeyboardEvent): void => {
-    if (this.locked) return;
-
     if (
+      e.key === ' ' ||
       e.code === 'Space' ||
+      e.key === 'ArrowUp' ||
+      e.key === 'ArrowDown' ||
       e.code === 'ArrowLeft' ||
       e.code === 'ArrowRight' ||
       e.code === 'ArrowUp' ||
@@ -272,6 +274,7 @@ export class InputManager {
     ) {
       e.preventDefault();
     }
+    if (this.locked) return;
 
     if (e.code === 'KeyM') {
       this.callbacks.onToggleMute();

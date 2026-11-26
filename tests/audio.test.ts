@@ -306,4 +306,23 @@ describe('Adaptive Music & Audio Mastering (Phase 14)', () => {
     audio.resumeFromAd();
     me.setCustomTrackBuffer(null);
   });
+
+  it('throttles rapid SFX within 55ms and caps active SFX voices at 16', () => {
+    const audio = new AudioEngine(false, false, false, 'high');
+    audio.unlock();
+
+    // Rapid wall hits within 10ms should be throttled after the first
+    const oscBefore = mockCtxInstance!.oscillatorCount;
+    for (let i = 0; i < 6; i++) {
+      audio.playWallHit(900, 120 + i * 20);
+    }
+    expect(mockCtxInstance!.oscillatorCount - oscBefore).toBe(1);
+
+    // Distinct sounds triggering rapidly never exceed 16 concurrent active SFX voices
+    for (let i = 0; i < 30; i++) {
+      vi.advanceTimersByTime(60);
+      audio.playHit(i, true, false, 950, 270);
+      expect(audio.getActiveVoiceCount()).toBeLessThanOrEqual(16);
+    }
+  });
 });

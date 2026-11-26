@@ -25,6 +25,7 @@ export class JuiceSystem {
   private shakeY = 0;
   private shakeMagnitude = 0;
   private vignetteAlpha = 0;
+  private zoomPulse = 0;
   private shockwaves: Shockwave[] = [];
   private shockwaveCursor = 0;
   private laserBeams: LaserBeam[] = [];
@@ -55,15 +56,16 @@ export class JuiceSystem {
   }
 
   triggerHitStop(seconds: number): void {
-    this.hitStopTimer = Math.max(this.hitStopTimer, Math.min(0.05, seconds));
+    this.hitStopTimer = Math.max(this.hitStopTimer, Math.min(0.055, seconds));
   }
 
   triggerShake(magnitudePx: number): void {
-    this.shakeMagnitude = Math.min(8, Math.max(this.shakeMagnitude, magnitudePx));
+    this.shakeMagnitude = Math.min(9, Math.max(this.shakeMagnitude, magnitudePx));
   }
 
   triggerVignette(alpha: number = 0.35): void {
-    this.vignetteAlpha = Math.max(this.vignetteAlpha, alpha);
+    this.vignetteAlpha = Math.max(this.vignetteAlpha, Math.min(0.6, alpha));
+    this.zoomPulse = Math.max(this.zoomPulse, Math.min(0.018, alpha * 0.04));
   }
 
   addShockwave(x: number, y: number, maxRadius: number, color: string = '#fb923c'): void {
@@ -109,7 +111,10 @@ export class JuiceSystem {
     }
 
     if (this.vignetteAlpha > 0) {
-      this.vignetteAlpha = Math.max(0, this.vignetteAlpha - dt * 1.4);
+      this.vignetteAlpha = Math.max(0, this.vignetteAlpha - dt * 1.45);
+    }
+    if (this.zoomPulse > 0) {
+      this.zoomPulse = Math.max(0, this.zoomPulse - dt * 0.08);
     }
 
     for (let i = 0; i < SHOCKWAVE_POOL_SIZE; i++) {
@@ -141,34 +146,37 @@ export class JuiceSystem {
     return this.vignetteAlpha;
   }
 
+  getZoomScale(): number {
+    return 1 + this.zoomPulse;
+  }
+
   renderWorldEffects(ctx: CanvasRenderingContext2D, shaftWidth: number): void {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
     for (let i = 0; i < SHOCKWAVE_POOL_SIZE; i++) {
       const sw = this.shockwaves[i];
       if (!sw.active) continue;
       const progress = 1 - sw.life / sw.maxLife;
       const radius = sw.maxRadius * progress;
-      ctx.save();
       ctx.globalAlpha = (1 - progress) * 0.85;
       ctx.strokeStyle = sw.color;
-      ctx.lineWidth = 4 * (1 - progress) + 1;
+      ctx.lineWidth = 4.5 * (1 - progress) + 1.5;
       ctx.beginPath();
       ctx.arc(sw.x, sw.y, radius, 0, Math.PI * 2);
       ctx.stroke();
-      ctx.restore();
     }
 
     for (let i = 0; i < LASER_POOL_SIZE; i++) {
       const lb = this.laserBeams[i];
       if (!lb.active) continue;
       const alpha = lb.life / lb.maxLife;
-      ctx.save();
-      ctx.globalAlpha = alpha * 0.9;
+      ctx.globalAlpha = alpha * 0.92;
       ctx.fillStyle = lb.color;
-      ctx.fillRect(0, lb.y - 10 * alpha, shaftWidth, 20 * alpha);
+      ctx.fillRect(0, lb.y - 12 * alpha, shaftWidth, 24 * alpha);
       ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, lb.y - 3 * alpha, shaftWidth, 6 * alpha);
-      ctx.restore();
+      ctx.fillRect(0, lb.y - 3.5 * alpha, shaftWidth, 7 * alpha);
     }
+    ctx.restore();
   }
 
   clear(): void {
@@ -177,6 +185,7 @@ export class JuiceSystem {
     this.shakeX = 0;
     this.shakeY = 0;
     this.vignetteAlpha = 0;
+    this.zoomPulse = 0;
     for (let i = 0; i < SHOCKWAVE_POOL_SIZE; i++) {
       this.shockwaves[i].active = false;
     }

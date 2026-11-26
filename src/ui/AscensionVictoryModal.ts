@@ -4,6 +4,7 @@ import {
 } from '../config/gameConfig';
 import { i18n, type TranslationKey } from '../i18n/translations';
 import { formatCompact } from '../utils/format';
+import { AdButton } from './AdButton';
 import { svgIcon } from './icons';
 import { UI_ICONS, getCrestUrlForTier } from './uiAssets';
 
@@ -41,7 +42,16 @@ export class AscensionVictoryModal {
     const nextRoman = toRomanNumeral(opts.newTier + 1);
     const crestUrl = getCrestUrlForTier(opts.newTier);
     const nextCrestUrl = getCrestUrlForTier(opts.newTier + 1);
-    const isPoki = typeof __PLATFORM__ !== 'undefined' && __PLATFORM__ === 'poki';
+    const doubleBtnMarkup =
+      opts.coinsEarned > 0
+        ? AdButton.renderMarkup({
+            labelHtml: i18n.t('double_victory_coins'),
+            attrs: 'data-vic="double"',
+            className: 'rm-btn rm-btn-gold',
+            style: 'flex:1;min-height:44px;',
+            fallbackMode: 'hide',
+          })
+        : '';
 
     this.backdrop.innerHTML = `
       <div class="arcade-modal-shell rm-victory-shell">
@@ -73,7 +83,7 @@ export class AscensionVictoryModal {
               <div style="font-size:20px;font-weight:900;color:#fde047;text-shadow:0 2px 0 #120c08;">${opts.maxCombo}x</div>
             </div>
             <div class="rm-stat-plaque">
-              <img src="${UI_ICONS.oreValue}" style="width:32px;height:32px;object-fit:contain;" alt="" />
+              <span class="rm-stat-coin-svg">${svgIcon('coin')}</span>
               <div style="font-size:10px;color:#cbd5e1;font-weight:900;letter-spacing:0.4px;">${i18n.t('earned_coins').toUpperCase()}</div>
               <div style="font-size:20px;font-weight:900;color:#fbbf24;text-shadow:0 2px 0 #120c08;" data-vic="coins">${formatCompact(opts.coinsEarned)}</div>
             </div>
@@ -94,13 +104,7 @@ export class AscensionVictoryModal {
               <img src="${UI_ICONS.drillDamage}" style="width:18px;height:18px;object-fit:contain;" alt="" />
               ${i18n.t('upgrades').toUpperCase()}
             </button>
-            ${
-              opts.coinsEarned > 0
-                ? `<button class="rm-btn rm-btn-gold" style="flex:1;min-height:44px;" data-vic="double">
-                    ${svgIcon('adPlay')} ${i18n.t('double_victory_coins')}
-                  </button>`
-                : ''
-            }
+            ${doubleBtnMarkup}
           </div>
         </div>
       </div>
@@ -123,7 +127,7 @@ export class AscensionVictoryModal {
         const coinsEl = this.backdrop.querySelector('[data-vic="coins"]');
         if (coinsEl) coinsEl.textContent = formatCompact(opts.coinsEarned * 2);
         doubleBtn.style.display = 'none';
-      } else if (isPoki) {
+      } else if (!AdButton.isAvailable()) {
         doubleBtn.style.display = 'none';
       } else {
         doubleBtn.disabled = false;

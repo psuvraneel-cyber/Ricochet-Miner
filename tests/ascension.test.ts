@@ -5,6 +5,7 @@ import {
   calcBlockHP,
   calcCoinValue,
   calcDrillDamage,
+  calcMultiOrbCount,
   getAscensionCapBonus,
   getAscensionCoinMultiplier,
   getAscensionDamageBonus,
@@ -244,5 +245,16 @@ describe('Ascension System (Phase 13)', () => {
     expect(gameplayStart).toHaveBeenCalledTimes(1);
     expect(happytime).toHaveBeenCalledTimes(1);
     expect(gameplayStop).toHaveBeenCalledTimes(1);
+  });
+
+  it('scales calcMultiOrbCount monotonically past level 6 up to Ascension tiers', () => {
+    let prev = 0;
+    for (let lvl = 1; lvl <= 16; lvl++) {
+      const count = calcMultiOrbCount(lvl);
+      expect(count).toBe(lvl);
+      expect(count).toBeGreaterThan(prev);
+      prev = count;
+    }
+    expect(calcMultiOrbCount(18)).toBe(18);
   });
 });

@@ -29,7 +29,7 @@ export type IconName =
   | 'bossCore';
 
 const SVG_MAP: Record<IconName, string> = {
-  coin: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none"><circle cx="12" cy="12" r="9.5" fill="#fbbf24" stroke="#1a1310" stroke-width="2.2"/><circle cx="12" cy="12" r="5.5" stroke="#b45309" stroke-width="1.8"/></svg>`,
+  coin: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none"><circle cx="12" cy="12" r="9.5" fill="#d97706" stroke="#181210" stroke-width="2"/><circle cx="12" cy="11.3" r="8" fill="#fbbf24" stroke="#92400e" stroke-width="1.2"/><circle cx="12" cy="11.3" r="5" fill="#fde047" stroke="#b45309" stroke-width="1.3"/><path d="M9.5 8.5l2.5-1.5 2.5 1.5" stroke="#fffbeb" stroke-width="1.6" stroke-linecap="round"/></svg>`,
   pickaxe: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none"><path d="M5 19L15 9" stroke="#d97706" stroke-width="3" stroke-linecap="round"/><path d="M9 5c4-1 8 1 10 5l-3 2c-1.5-2.5-4-3.8-7-4V5z" fill="#94a3b8" stroke="#1a1310" stroke-width="2" stroke-linejoin="round"/></svg>`,
   pause: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none"><rect x="6" y="5" width="4.5" height="14" rx="1.5" fill="#f8fafc" stroke="#1a1310" stroke-width="1.8"/><rect x="13.5" y="5" width="4.5" height="14" rx="1.5" fill="#f8fafc" stroke="#1a1310" stroke-width="1.8"/></svg>`,
   play: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none"><path d="M7 5l12 7-12 7V5z" fill="#f8fafc" stroke="#1a1310" stroke-width="2" stroke-linejoin="round"/></svg>`,

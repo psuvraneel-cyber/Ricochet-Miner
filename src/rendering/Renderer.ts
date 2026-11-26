@@ -41,6 +41,7 @@ export interface RenderSceneState {
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
   private atlas: SpriteAtlas = sharedSpriteAtlas;
+  private lastFrameMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
 
   constructor(canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d', { alpha: false });
@@ -57,8 +58,12 @@ export class Renderer {
   }
 
   render(layout: ViewportLayout, scene: RenderSceneState): void {
+    const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const rawDt = Math.min(0.05, Math.max(0.001, (nowMs - this.lastFrameMs) * 0.001));
+    this.lastFrameMs = nowMs;
+
     const ctx = this.ctx;
-    const { cssWidth, cssHeight, dpr, scale, shaftX } = layout;
+    const { cssWidth, cssHeight, dpr, scale, shaftX, topOffsetPx } = layout;
     const snapCamY = Math.round(scene.cameraY * scale) / scale;
     const viewDepth =
       scene.baseDepthMeters +
@@ -81,32 +86,45 @@ export class Renderer {
       scene.baseDepthMeters,
       scale,
       biome,
-      layout.isPortrait
+      layout.isPortrait,
+      topOffsetPx
     );
 
-    // 2. Shaft World Transform
+    // 2. Shaft World Transform (supports top HUD clearance & micro zoom-punch)
     const shake = scene.juice.getShakeOffset();
+    const zoom = scene.juice.getZoomScale();
     const beamWidthPx = 26 * scale;
+    const viewWorldTop = snapCamY - topOffsetPx / scale;
+    const viewWorldH = cssHeight / scale + topOffsetPx / scale;
+
     ctx.save();
     ctx.beginPath();
     ctx.rect(shaftX - beamWidthPx, 0, layout.shaftWidthPx + beamWidthPx * 2, cssHeight);
     ctx.clip();
 
-    ctx.translate(shaftX + shake.x * scale, shake.y * scale);
+    if (zoom !== 1) {
+      const zcx = shaftX + layout.shaftWidthPx * 0.5;
+      const zcy = topOffsetPx + (cssHeight - topOffsetPx) * 0.42;
+      ctx.translate(zcx, zcy);
+      ctx.scale(zoom, zoom);
+      ctx.translate(-zcx, -zcy);
+    }
+
+    ctx.translate(shaftX + shake.x * scale, topOffsetPx + shake.y * scale);
     ctx.scale(scale, scale);
     ctx.translate(0, -snapCamY);
 
     // Inner shaft depth + volumetric sunbeams
-    this.renderShaftInterior(ctx, snapCamY, cssHeight / scale, biome, scene.timeS);
+    this.renderShaftInterior(ctx, viewWorldTop, viewWorldH, biome, scene.timeS);
 
     // Entities (WebP sprites + dynamic effects)
-    const minVisibleY = snapCamY - 90;
+    const minVisibleY = viewWorldTop - 90;
     const maxVisibleY = snapCamY + cssHeight / scale + 90;
     for (let i = 0; i < scene.entities.length; i++) {
       const block = scene.entities[i];
       if (!block.alive) continue;
       if (block.y + block.height < minVisibleY || block.y > maxVisibleY) continue;
-      this.renderEntity(ctx, block, biome, scene.timeS);
+      this.renderEntity(ctx, block, biome, scene.timeS, rawDt);
     }
 
     // Golden Aim Trajectory & 2nd-Bounce Bank Preview
@@ -138,22 +156,49 @@ export class Renderer {
       this.renderAimFeedback(ctx, scene.aimFeedback, scene.timeS);
     }
 
-    // Coins
+    // Spinning 3D Metallic Coins + Magnet Trails
     for (let i = 0; i < scene.coins.length; i++) {
       const c = scene.coins[i];
       if (!c.alive) continue;
+      const spinPhase = scene.timeS * 8.5 + i * 1.17;
+      const spinX = Math.max(0.24, Math.abs(Math.cos(spinPhase)));
+
       ctx.save();
-      ctx.fillStyle = 'rgba(255, 216, 77, 0.28)';
+      if (c.magnetized) {
+        const tailX = c.x - c.vx * 0.035;
+        const tailY = c.y - c.vy * 0.035;
+        ctx.strokeStyle = 'rgba(253, 224, 71, 0.55)';
+        ctx.lineWidth = 4;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(tailX, tailY);
+        ctx.lineTo(c.x, c.y);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = 'rgba(251, 191, 36, 0.25)';
       ctx.beginPath();
-      ctx.arc(c.x, c.y, 11, 0, Math.PI * 2);
+      ctx.arc(c.x, c.y, 10.5, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = '#ffd84d';
+
+      ctx.translate(c.x, c.y);
+      ctx.scale(spinX, 1);
+
+      ctx.fillStyle = '#f59e0b';
       ctx.beginPath();
-      ctx.arc(c.x, c.y, 6.5, 0, Math.PI * 2);
+      ctx.arc(0, 0, 7.2, 0, Math.PI * 2);
       ctx.fill();
       ctx.strokeStyle = '#181210';
       ctx.lineWidth = 2;
       ctx.stroke();
+
+      ctx.fillStyle = '#fde047';
+      ctx.beginPath();
+      ctx.arc(-0.5, -0.5, 4.6, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#fffbeb';
+      ctx.fillRect(-1.1, -3, 2.2, 6);
       ctx.restore();
     }
 
@@ -170,17 +215,21 @@ export class Renderer {
     scene.floatingText.render(ctx);
 
     // Timber Shaft Beams (env_timber_beam.webp) & Swaying Lanterns (prop_lantern.webp)
-    this.renderTimberShaftFrame(ctx, snapCamY, cssHeight / scale, biome, scene.timeS);
+    this.renderTimberShaftFrame(ctx, viewWorldTop, viewWorldH, biome, scene.timeS);
 
     ctx.restore();
 
-    // 3. Screen Vignette Pulse on Explosions
+    // 3. True Radial Screen Vignette + Impact Edge Pulse
     const vigAlpha = scene.juice.getVignetteAlpha();
-    if (vigAlpha > 0.01) {
-      ctx.fillStyle = `rgba(251, 146, 60, ${vigAlpha.toFixed(2)})`;
-      ctx.fillRect(0, 0, cssWidth, 14);
-      ctx.fillRect(0, cssHeight - 14, cssWidth, 14);
-    }
+    const cx = cssWidth * 0.5;
+    const cy = cssHeight * 0.5;
+    const outerR = Math.hypot(cx, cy);
+    const vig = ctx.createRadialGradient(cx, cy, outerR * 0.52, cx, cy, outerR);
+    vig.addColorStop(0, 'rgba(0, 0, 0, 0)');
+    vig.addColorStop(0.82, 'rgba(8, 6, 5, 0.22)');
+    vig.addColorStop(1, vigAlpha > 0.01 ? `rgba(249, 115, 22, ${Math.min(0.45, vigAlpha * 1.15).toFixed(2)})` : 'rgba(8, 6, 5, 0.52)');
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, cssWidth, cssHeight);
 
     ctx.restore();
   }
@@ -195,7 +244,8 @@ export class Renderer {
     baseDepthMeters: number,
     scale: number,
     biome: BiomeSpec,
-    isPortrait: boolean
+    isPortrait: boolean,
+    topOffsetPx: number
   ): void {
     ctx.fillStyle = biome.index === 0 ? '#16110e' : biome.palette.bgBottom;
     ctx.fillRect(0, 0, cssWidth, cssHeight);
@@ -219,7 +269,7 @@ export class Renderer {
       ctx.rect(0, 0, shaftX, cssHeight);
       ctx.clip();
       for (let y = -scrollY - tileH; y < cssHeight + tileH; y += tileH) {
-        ctx.drawImage(flankTex, shaftX - tileW, y, tileW, tileH);
+        ctx.drawImage(flankTex, shaftX - tileW, y, tileW, tileH + 1);
       }
       ctx.restore();
 
@@ -231,7 +281,7 @@ export class Renderer {
       ctx.translate(rightX + tileW, 0);
       ctx.scale(-1, 1);
       for (let y = -scrollY - tileH; y < cssHeight + tileH; y += tileH) {
-        ctx.drawImage(flankTex, 0, y, tileW, tileH);
+        ctx.drawImage(flankTex, 0, y, tileW, tileH + 1);
       }
       ctx.restore();
     }
@@ -252,7 +302,7 @@ export class Renderer {
     ctx.fillRect(rightX, 0, rightW, cssHeight);
 
     // Uniform mathematical depth ruler along far-left edge (10m, 20m, 30m...)
-    this.renderDepthRuler(ctx, cssHeight, cameraY, baseDepthMeters, scale);
+    this.renderDepthRuler(ctx, cssHeight, cameraY, baseDepthMeters, scale, topOffsetPx);
   }
 
   private renderDepthRuler(
@@ -260,21 +310,22 @@ export class Renderer {
     cssHeight: number,
     cameraY: number,
     baseDepthMeters: number,
-    scale: number
+    scale: number,
+    topOffsetPx: number
   ): void {
     const pxPerMeter = PHYSICS_CONFIG.TILE_SIZE / PHYSICS_CONFIG.METERS_PER_ROW;
     const minDepth = Math.max(0, Math.floor((baseDepthMeters + cameraY / pxPerMeter) / 10) * 10);
     const maxDepth = minDepth + Math.ceil(cssHeight / (pxPerMeter * scale * 10)) * 10 + 10;
 
     ctx.save();
-    ctx.font = '900 12px system-ui, sans-serif';
+    ctx.font = '700 12px "Lilita One", "Fredoka", system-ui, sans-serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
 
     for (let d = minDepth; d <= maxDepth; d += 5) {
       const worldY = (d - baseDepthMeters) * pxPerMeter;
-      const screenY = (worldY - cameraY) * scale;
-      if (screenY < 58 || screenY > cssHeight - 16) continue;
+      const screenY = topOffsetPx + (worldY - cameraY) * scale;
+      if (screenY < Math.max(58, topOffsetPx + 20) || screenY > cssHeight - 16) continue;
 
       const isMajor = d % 10 === 0;
       ctx.fillStyle = isMajor ? '#fde68a' : 'rgba(226, 232, 240, 0.55)';
@@ -362,7 +413,7 @@ export class Renderer {
     timeS: number
   ): void {
     const beamW = 24;
-    const beamTex = this.atlas.getEnvTimberBeam();
+    const beamTex = this.atlas.getEnvTimberBeam(biome);
     ctx.save();
 
     if (beamTex) {
@@ -635,22 +686,42 @@ export class Renderer {
     ctx: CanvasRenderingContext2D,
     b: BlockEntity,
     biome: BiomeSpec,
-    timeS: number
+    timeS: number,
+    rawDt: number
   ): void {
-    const cx = b.x + b.width * 0.5;
+    const targetX = b.x;
+    const visX = b.renderX ?? targetX;
+    const nextVisX =
+      Math.abs(targetX - visX) < 0.4 ? targetX : visX + (targetX - visX) * Math.min(1, rawDt * 24);
+    b.renderX = nextVisX;
+    const drawX = nextVisX;
+    const cx = drawX + b.width * 0.5;
     const cy = b.y + b.height * 0.5;
 
     if (b.kind === 'portal_entry' || b.kind === 'portal_exit') {
       ctx.save();
       const isEntry = b.kind === 'portal_entry';
-      const portalTex = this.atlas.getPropPortal();
+      const portalTex = this.atlas.getPropPortal(isEntry);
       ctx.translate(cx, cy);
+
+      const pulse = 1 + Math.sin(timeS * 4.5 + b.id) * 0.08;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const aura = ctx.createRadialGradient(0, 0, b.radius * 0.2, 0, 0, b.radius * 1.45 * pulse);
+      aura.addColorStop(0, isEntry ? 'rgba(34, 211, 238, 0.55)' : 'rgba(251, 146, 60, 0.55)');
+      aura.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = aura;
+      ctx.beginPath();
+      ctx.arc(0, 0, b.radius * 1.45 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
       ctx.rotate(timeS * (isEntry ? 2.4 : -2.4));
       if (portalTex) {
-        const size = b.radius * 2.5;
+        const size = b.radius * 2.55;
         ctx.drawImage(portalTex, -size * 0.5, -size * 0.5, size, size);
       } else {
-        ctx.strokeStyle = isEntry ? '#28e0d8' : '#f43f5e';
+        ctx.strokeStyle = isEntry ? '#28e0d8' : '#fb923c';
         ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.arc(0, 0, b.radius, 0, Math.PI * 2);
@@ -690,168 +761,91 @@ export class Renderer {
     const sprite = this.atlas.getBlockSprite(b.kind, biome, b.col, b.row);
     ctx.save();
 
-    if (sprite) {
-      if (b.kind === 'vault') {
-        // Rich royal-purple & gold treasure chest silhouette with lid seam, straps & lock clasp
-        const pad = 2;
-        const bx = b.x + pad;
-        const by = b.y + pad;
-        const bw = b.width - pad * 2;
-        const bh = b.height - pad * 2;
-        const lidY = by + bh * 0.34;
-
-        // Subtle gold treasure aura underneath
-        ctx.fillStyle = '#4c1d95';
-        ctx.fillRect(bx, by, bw, bh);
-        ctx.globalAlpha = 0.25;
-        ctx.drawImage(sprite, bx + 4, by + 4, bw - 8, bh - 8);
-        ctx.globalAlpha = 1;
-
-        // Upper lid shade
-        ctx.fillStyle = '#6d28d9';
-        ctx.fillRect(bx, by, bw, lidY - by);
-
-        // Vertical gold chest straps
-        const strapW = 7;
-        ctx.fillStyle = '#d97706';
-        ctx.fillRect(bx + 12, by, strapW, bh);
-        ctx.fillRect(bx + bw - 12 - strapW, by, strapW, bh);
-
-        // Lid seam + heavy gold border
-        ctx.fillStyle = '#181210';
-        ctx.fillRect(bx, lidY - 2, bw, 4);
-        ctx.fillStyle = '#fbbf24';
-        ctx.fillRect(bx, lidY - 1, bw, 2);
-
-        ctx.strokeStyle = '#fbbf24';
-        ctx.lineWidth = 3;
-        ctx.strokeRect(bx, by, bw, bh);
-
-        // Golden lock clasp centered on lid seam
-        const lockW = 14;
-        const lockH = 11;
-        ctx.fillStyle = '#181210';
-        ctx.fillRect(cx - lockW * 0.5 - 1.5, lidY - lockH * 0.5 - 1.5, lockW + 3, lockH + 3);
-        ctx.fillStyle = '#fde047';
-        ctx.fillRect(cx - lockW * 0.5, lidY - lockH * 0.5, lockW, lockH);
-      } else {
-        ctx.drawImage(sprite, b.x, b.y, b.width, b.height);
-      }
-    } else {
-      ctx.fillStyle = biome.palette.strataFill;
-      ctx.fillRect(b.x, b.y, b.width, b.height);
+    if (b.kind === 'boss_core') {
+      const pulse = 0.55 + 0.35 * Math.sin(timeS * 5 + b.id);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const coreGlow = ctx.createRadialGradient(cx, cy, 4, cx, cy, b.width * 0.78);
+      coreGlow.addColorStop(0, `rgba(251, 146, 60, ${(0.55 * pulse).toFixed(2)})`);
+      coreGlow.addColorStop(0.6, `rgba(244, 63, 94, ${(0.28 * pulse).toFixed(2)})`);
+      coreGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = coreGlow;
+      ctx.beginPath();
+      ctx.arc(cx, cy, b.width * 0.78, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    } else if (b.kind === 'vault') {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const vGlow = ctx.createRadialGradient(cx, cy, 4, cx, cy, b.width * 0.7);
+      vGlow.addColorStop(0, 'rgba(250, 204, 21, 0.32)');
+      vGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = vGlow;
+      ctx.beginPath();
+      ctx.arc(cx, cy, b.width * 0.7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
     }
 
-    // Distinct visual silhouettes for Splitter Prism, Laser Drill Cell, and Armored Granite
-    if (b.kind === 'splitter') {
-      // Glowing cyan crystal prism + split-beam arrows
-      ctx.fillStyle = 'rgba(6, 182, 212, 0.34)';
-      ctx.beginPath();
-      ctx.moveTo(cx, b.y + 4);
-      ctx.lineTo(b.x + b.width - 4, cy);
-      ctx.lineTo(cx, b.y + b.height - 4);
-      ctx.lineTo(b.x + 4, cy);
-      ctx.closePath();
-      ctx.fill();
+    if (sprite) {
+      ctx.drawImage(sprite, drawX, b.y, b.width, b.height);
+    } else {
+      ctx.fillStyle = biome.palette.strataFill;
+      ctx.fillRect(drawX, b.y, b.width, b.height);
+    }
 
-      ctx.strokeStyle = '#22d3ee';
-      ctx.lineWidth = 2.8;
-      ctx.stroke();
-
-      // Inner bright prism facet + dual split arrows
-      ctx.strokeStyle = '#cffafe';
-      ctx.lineWidth = 1.8;
-      ctx.beginPath();
-      ctx.moveTo(cx, b.y + 11);
-      ctx.lineTo(cx, cy - 6);
-      ctx.moveTo(cx, cy + 4);
-      ctx.lineTo(cx - 11, b.y + b.height - 12);
-      ctx.moveTo(cx, cy + 4);
-      ctx.lineTo(cx + 11, b.y + b.height - 12);
-      ctx.stroke();
-    } else if (b.kind === 'laser') {
-      // Industrial hazard casing + top/bottom amber stripes + glowing side emitter lenses
-      const bx = b.x + 2;
-      const by = b.y + 2;
-      const bw = b.width - 4;
-      const bh = b.height - 4;
-      const bandH = 7;
-
-      // Top & bottom amber hazard stripes
+    if (b.kind === 'laser') {
+      const glint = 0.55 + 0.45 * Math.sin(timeS * 8 + b.id);
       ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = `rgba(253, 224, 71, ${(0.65 * glint).toFixed(2)})`;
       ctx.beginPath();
-      ctx.rect(bx, by, bw, bandH);
-      ctx.rect(bx, by + bh - bandH, bw, bandH);
-      ctx.clip();
-      ctx.fillStyle = '#181210';
-      ctx.fillRect(bx, by, bw, bh);
-      ctx.fillStyle = '#f59e0b';
-      for (let sx = -bh; sx < bw + bh; sx += 12) {
-        ctx.beginPath();
-        ctx.moveTo(bx + sx, by);
-        ctx.lineTo(bx + sx + 6, by);
-        ctx.lineTo(bx + sx - 4, by + bh);
-        ctx.lineTo(bx + sx - 10, by + bh);
-        ctx.closePath();
-        ctx.fill();
-      }
+      ctx.arc(drawX + 5, cy, 4.5, 0, Math.PI * 2);
+      ctx.arc(drawX + b.width - 5, cy, 4.5, 0, Math.PI * 2);
+      ctx.fill();
       ctx.restore();
-
-      // Glowing laser emitter lenses on left & right + subtle beam charge line
-      ctx.strokeStyle = 'rgba(254, 240, 138, 0.55)';
+    } else if (b.kind === 'boss_core') {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(253, 186, 116, 0.85)';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(bx + 10, cy);
-      ctx.lineTo(bx + bw - 10, cy);
+      ctx.arc(cx, cy, b.width * 0.34, 0, Math.PI * 2);
       ctx.stroke();
-
-      ctx.strokeStyle = '#fbbf24';
-      ctx.lineWidth = 2.5;
-      ctx.strokeRect(bx, by, bw, bh);
-
-      ctx.fillStyle = '#fde047';
-      ctx.fillRect(b.x + 2, cy - 6, 8, 12);
-      ctx.fillRect(b.x + b.width - 10, cy - 6, 8, 12);
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(b.x + 3, cy - 3, 4, 6);
-      ctx.fillRect(b.x + b.width - 7, cy - 3, 4, 6);
-    } else if (b.kind === 'granite' && b.biomeIndex >= 1) {
-      ctx.strokeStyle = '#94a3b8';
-      ctx.lineWidth = 2.5;
-      ctx.strokeRect(b.x + 2, b.y + 2, b.width - 4, b.height - 4);
+      ctx.restore();
     }
 
     // Hit flash overlay
     if (b.hitFlashTimer > 0) {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
-      ctx.fillRect(b.x + 2, b.y + 2, b.width - 4, b.height - 4);
+      ctx.fillRect(drawX + 2, b.y + 2, b.width - 4, b.height - 4);
     }
 
-    // Progressive molten/amber fracture lines + SINGLE bold outlined centered HP numeral
+    // Progressive jagged organic fissure cracks + SINGLE bold outlined centered HP numeral
     if (Number.isFinite(b.hp) && b.maxHp > 0) {
       const ratio = b.hp / b.maxHp;
       if (ratio < 1) {
-        ctx.strokeStyle = 'rgba(255, 216, 77, 0.92)';
-        ctx.lineWidth = 2.2;
+        ctx.save();
         ctx.beginPath();
-        if (ratio <= 0.75) {
-          ctx.moveTo(b.x + 8, b.y + 8);
-          ctx.lineTo(cx, cy);
-        }
-        if (ratio <= 0.5) {
-          ctx.moveTo(b.x + b.width - 8, b.y + 10);
-          ctx.lineTo(cx - 4, cy + 4);
-        }
-        if (ratio <= 0.25) {
-          ctx.moveTo(b.x + 10, b.y + b.height - 8);
-          ctx.lineTo(cx + 8, cy - 4);
-        }
+        ctx.rect(drawX + 2, b.y + 2, b.width - 4, b.height - 4);
+        ctx.clip();
+
+        ctx.strokeStyle = 'rgba(24, 18, 16, 0.78)';
+        ctx.lineWidth = 3.2;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        this.traceJaggedCracks(ctx, drawX, b.y, b.width, b.height, cx, cy, ratio, b.id);
         ctx.stroke();
+
+        ctx.strokeStyle = 'rgba(255, 224, 102, 0.92)';
+        ctx.lineWidth = 1.6;
+        this.traceJaggedCracks(ctx, drawX, b.y, b.width, b.height, cx, cy, ratio, b.id);
+        ctx.stroke();
+        ctx.restore();
       }
 
       if (b.kind !== 'tnt' && (b.hp < b.maxHp || b.hp >= 10)) {
         const label = formatCompact(Math.ceil(b.hp));
-        ctx.font = '900 17px system-ui, sans-serif';
+        ctx.font = '700 17px "Lilita One", "Fredoka", system-ui, sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.lineWidth = 4.5;
@@ -863,6 +857,42 @@ export class Renderer {
     }
 
     ctx.restore();
+  }
+
+  private traceJaggedCracks(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    cx: number,
+    cy: number,
+    ratio: number,
+    seed: number
+  ): void {
+    const jitter = ((seed % 5) - 2) * 1.4;
+    ctx.beginPath();
+    if (ratio <= 0.78) {
+      ctx.moveTo(x + 6, y + 6);
+      ctx.lineTo(x + w * 0.28 + jitter, y + h * 0.34);
+      ctx.lineTo(x + w * 0.42 - jitter, y + h * 0.3);
+      ctx.lineTo(cx, cy);
+    }
+    if (ratio <= 0.5) {
+      ctx.moveTo(x + w - 6, y + 8);
+      ctx.lineTo(x + w * 0.72 - jitter, y + h * 0.28);
+      ctx.lineTo(x + w * 0.58 + jitter, y + h * 0.44);
+      ctx.lineTo(cx - 2, cy + 2);
+    }
+    if (ratio <= 0.25) {
+      ctx.moveTo(x + 8, y + h - 6);
+      ctx.lineTo(x + w * 0.32 - jitter, y + h * 0.68);
+      ctx.lineTo(x + w * 0.46 + jitter, y + h * 0.56);
+      ctx.lineTo(cx + 3, cy - 2);
+      ctx.moveTo(cx + 4, cy + 3);
+      ctx.lineTo(x + w * 0.76, y + h * 0.76);
+      ctx.lineTo(x + w - 7, y + h - 9);
+    }
   }
 
   private renderOrb(ctx: CanvasRenderingContext2D, orb: Orb, skin: SkinSpec): void {

@@ -1,3 +1,5 @@
+import lilitaOneUrl from '../assets/fonts/lilita-one.woff2';
+import fredokaBoldUrl from '../assets/fonts/fredoka-bold.woff2';
 import { UI_MODAL_FRAME_URL } from './uiAssets';
 
 export function injectGameStyles(): void {
@@ -5,9 +7,24 @@ export function injectGameStyles(): void {
   const style = document.createElement('style');
   style.id = 'rm-styles';
   style.textContent = `
+    @font-face {
+      font-family: 'Lilita One';
+      src: url("${lilitaOneUrl}") format('woff2');
+      font-weight: 400;
+      font-style: normal;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: 'Fredoka';
+      src: url("${fredokaBoldUrl}") format('woff2');
+      font-weight: 700;
+      font-style: normal;
+      font-display: swap;
+    }
     html, body, #app, #ui-root {
       scrollbar-width: none;
       -ms-overflow-style: none;
+      font-family: 'Fredoka', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     }
     html::-webkit-scrollbar,
     body::-webkit-scrollbar,
@@ -54,13 +71,14 @@ export function injectGameStyles(): void {
       flex-shrink: 0;
     }
     .rm-pill {
-      background: linear-gradient(180deg, #4b382a 0%, #2e2017 100%);
+      background: linear-gradient(180deg, #4f3a2a 0%, #2d1e15 100%);
       border: 2.5px solid #1a1310;
-      box-shadow: inset 0 2px 0 rgba(255, 240, 200, 0.22), 0 4px 0 #1a1310;
+      box-shadow: inset 0 2px 0 rgba(255, 240, 200, 0.25), 0 4px 0 #1a1310;
       border-radius: 12px;
       padding: 5px 10px;
       font-size: clamp(11px, 2.8vw, 14px);
-      font-weight: 900;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
       color: #fffbeb;
       text-shadow: 0 2px 0 #1a1310;
       display: inline-flex;
@@ -77,12 +95,14 @@ export function injectGameStyles(): void {
       min-height: 42px;
       border-radius: 12px;
       border: 2.5px solid #1a1310;
-      background: linear-gradient(180deg, #5c4433 0%, #3d2b1f 100%);
-      box-shadow: inset 0 2px 0 rgba(255, 245, 220, 0.25), 0 4px 0 #1a1310;
+      background: linear-gradient(180deg, #624836 0%, #3b291d 100%);
+      box-shadow: inset 0 2px 0 rgba(255, 245, 220, 0.28), 0 4px 0 #1a1310;
       color: #fffbeb;
       text-shadow: 0 2px 0 #1a1310;
-      font-size: clamp(11px, 2.7vw, 14px);
-      font-weight: 900;
+      font-family: 'Lilita One', 'Fredoka', system-ui, sans-serif;
+      font-size: clamp(12px, 2.7vw, 14px);
+      font-weight: 700;
+      letter-spacing: 0.3px;
       padding: 7px 11px;
       cursor: pointer;
       display: inline-flex;
@@ -91,7 +111,10 @@ export function injectGameStyles(): void {
       gap: 6px;
       overflow: visible;
       white-space: nowrap;
-      transition: transform 0.06s ease, box-shadow 0.06s ease;
+      transition: filter 0.1s ease, box-shadow 0.06s ease;
+    }
+    .rm-btn:hover:not(:disabled) {
+      filter: brightness(1.07);
     }
     .rm-btn:active:not(:disabled) {
       transform: translateY(3px);
@@ -164,17 +187,27 @@ export function injectGameStyles(): void {
       z-index: 12;
       pointer-events: auto;
     }
-    @media (min-width: 900px) and (min-aspect-ratio: 11/10) {
+    @media (min-width: 780px) and (min-aspect-ratio: 11/10) {
+      .rm-hud-top > .rm-pill-row:first-child {
+        max-width: max(180px, calc(var(--rm-shaft-x, 220px) - 16px));
+      }
+      .rm-boss-row {
+        max-width: max(180px, calc(var(--rm-shaft-x, 220px) - 16px));
+      }
+      .rm-boss-bar {
+        max-width: 100%;
+        flex-wrap: wrap;
+      }
       .rm-arcade-console {
         left: auto;
-        right: 16px;
-        bottom: 20px;
+        right: 12px;
+        bottom: 16px;
         transform: none;
         flex-direction: column;
         align-items: stretch;
-        width: 206px;
-        padding: 10px;
-        gap: 8px;
+        width: clamp(156px, calc(var(--rm-shaft-x, 220px) - 24px), 206px);
+        padding: 9px;
+        gap: 7px;
       }
     }
     .rm-bottom-bar {
@@ -287,15 +320,20 @@ export function injectGameStyles(): void {
       gap: 8px;
     }
     .rm-stat-plaque {
-      background: #19130f;
-      border: 2px solid #4a3728;
-      box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.65);
+      background: linear-gradient(180deg, #271d17 0%, #17110d 100%);
+      border: 2.5px solid #6b4c30;
+      box-shadow: inset 0 2px 0 rgba(255, 225, 170, 0.14), inset 0 -4px 10px rgba(0, 0, 0, 0.55), 0 3px 0 #120c08;
       border-radius: 12px;
       padding: 10px 8px;
       display: flex;
       flex-direction: column;
       align-items: center;
       gap: 4px;
+    }
+    .rm-stat-coin-svg svg {
+      width: 34px;
+      height: 34px;
+      display: block;
     }
     .rm-upgrade-list {
       display: flex;
@@ -421,20 +459,31 @@ export function injectGameStyles(): void {
     }
     .rm-banner-slot {
       width: 100%;
-      min-height: 54px;
-      background: rgba(10, 8, 7, 0.75);
-      border: 1.5px dashed rgba(251, 191, 36, 0.35);
-      border-radius: 10px;
-      display: none;
+      min-width: 320px;
+      max-width: 728px;
+      height: 50px;
+      margin: 0 auto;
+      background: transparent;
+      border: none;
+      display: flex;
       align-items: center;
       justify-content: center;
       font-size: 12px;
       color: #cbd5e1;
       flex-shrink: 0;
+      overflow: hidden;
+    }
+    .rm-banner-slot.suppressed {
+      min-width: 0;
+      height: 0 !important;
+      visibility: hidden;
+      pointer-events: none;
+      margin: 0;
+      padding: 0;
     }
     .rm-ftue {
       position: absolute;
-      top: 29%;
+      top: calc(var(--rm-top-offset, 0px) + 150px);
       left: 50%;
       transform: translateX(-50%);
       text-align: center;
@@ -444,6 +493,35 @@ export function injectGameStyles(): void {
     .rm-ftue-hand {
       display: inline-block;
       animation: rmPull 1.3s ease-in-out infinite;
+    }
+    .rm-ftue-reticle {
+      display: inline-block;
+      animation: rmReticleBob 1.5s ease-in-out infinite;
+    }
+    @keyframes rmReticleBob {
+      0%, 100% { transform: translateY(0px); opacity: 0.95; }
+      50% { transform: translateY(6px); opacity: 0.72; }
+    }
+    .rm-floating-brand {
+      position: absolute;
+      bottom: max(112px, 14vh);
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 14;
+      pointer-events: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.24s ease;
+    }
+    .rm-floating-brand img {
+      width: min(210px, 46vw);
+      max-height: 78px;
+      object-fit: contain;
+      filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.82));
+    }
+    .rm-floating-brand.fading {
+      opacity: 0;
     }
     @keyframes rmPull {
       0%, 100% { transform: translateY(0px); opacity: 0.95; }
@@ -746,11 +824,7 @@ export function injectGameStyles(): void {
       font-size: 22px;
       letter-spacing: 1px;
       border-radius: 16px;
-      animation: rmPlayPulse 2s ease-in-out infinite;
-    }
-    @keyframes rmPlayPulse {
-      0%, 100% { transform: scale(1); }
-      50% { transform: scale(1.04); }
+      box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.5), 0 5px 0 #14532d, 0 8px 18px rgba(34, 197, 94, 0.35);
     }
     @media (max-width: 430px) {
       .rm-pill {

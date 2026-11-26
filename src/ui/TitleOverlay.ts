@@ -15,6 +15,7 @@ export interface TitleOverlayCallbacks {
 
 export class TitleOverlay {
   private el: HTMLDivElement;
+  private floatingCrestEl: HTMLDivElement;
   private visible = false;
 
   constructor(root: HTMLElement) {
@@ -22,6 +23,26 @@ export class TitleOverlay {
     this.el.className = 'rm-title-overlay';
     this.el.style.display = 'none';
     root.appendChild(this.el);
+
+    this.floatingCrestEl = document.createElement('div');
+    this.floatingCrestEl.className = 'rm-floating-brand';
+    this.floatingCrestEl.style.display = 'none';
+    root.appendChild(this.floatingCrestEl);
+  }
+
+  showFloatingIntroBanner(logoUrl: string): void {
+    this.floatingCrestEl.innerHTML = `<img src="${logoUrl}" alt="Ricochet Miner" />`;
+    this.floatingCrestEl.classList.remove('fading');
+    this.floatingCrestEl.style.display = 'flex';
+  }
+
+  dismissFloatingIntroBanner(): void {
+    if (this.floatingCrestEl.style.display === 'none') return;
+    this.floatingCrestEl.classList.add('fading');
+    window.setTimeout(() => {
+      this.floatingCrestEl.style.display = 'none';
+      this.floatingCrestEl.classList.remove('fading');
+    }, 240);
   }
 
   show(params: {
@@ -32,6 +53,7 @@ export class TitleOverlay {
     muted: boolean;
     callbacks: TitleOverlayCallbacks;
   }): void {
+    this.dismissFloatingIntroBanner();
     this.visible = true;
     this.el.classList.remove('hiding');
     this.el.style.display = 'flex';

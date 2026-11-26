@@ -1,6 +1,8 @@
 import { toRomanNumeral } from '../config/gameConfig';
 import { i18n } from '../i18n/translations';
+import { PlatformSDK } from '../sdk/PlatformSDK';
 import { formatCompact, formatMeters } from '../utils/format';
+import { AdButton } from './AdButton';
 import { svgIcon } from './icons';
 import { UI_ICONS } from './uiAssets';
 
@@ -198,6 +200,12 @@ export class HUDController {
     this.toastEl.className = 'rm-toast';
     this.toastEl.style.display = 'none';
     this.root.appendChild(this.toastEl);
+
+    PlatformSDK.onAdAvailabilityChange(() => {
+      if (!AdButton.isAvailable()) {
+        this.overdriveBtn.style.display = 'none';
+      }
+    });
   }
 
   refreshLabels(): void {
@@ -286,7 +294,10 @@ export class HUDController {
     this.speedBtn.style.borderColor = params.speedMult > 1 ? '#fde047' : '#1a1310';
     this.arcadeConsole.style.display = params.isAiming ? 'flex' : 'none';
     this.elevatorBtn.style.display = params.hasElevator ? 'inline-flex' : 'none';
-    this.overdriveBtn.style.display = params.showOverdriveOffer ? 'inline-flex' : 'none';
+    AdButton.syncVisibility(
+      this.overdriveBtn,
+      params.showOverdriveOffer && params.isAiming && !params.isRunning
+    );
 
     this.achievementsDotEl.style.display = params.hasUnclaimedFeats ? 'block' : 'none';
     this.loginDotEl.style.display = params.hasClaimableLogin ? 'block' : 'none';

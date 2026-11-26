@@ -45,11 +45,19 @@ export class MockAdapter implements IPortalAdapter {
     return { rewarded: true, reason: 'finished' };
   }
 
+  async hasAdblock(): Promise<boolean> {
+    return this.simulateAdBlock || this.simulateAdError;
+  }
+
+  isDisabled(): boolean {
+    return this.name === 'standalone';
+  }
+
   requestBanner(containerId: string): void {
     const el = typeof document !== 'undefined' ? document.getElementById(containerId) : null;
     if (el) {
       el.textContent = 'BANNER AD SLOT (DEV)';
-      el.style.display = 'flex';
+      el.style.visibility = 'visible';
     }
   }
 
@@ -57,8 +65,14 @@ export class MockAdapter implements IPortalAdapter {
     const el = typeof document !== 'undefined' ? document.getElementById(containerId) : null;
     if (el) {
       el.textContent = '';
-      el.style.display = 'none';
     }
+  }
+
+  clearAllBanners(): void {
+    if (typeof document === 'undefined') return;
+    document.querySelectorAll('.rm-banner-slot').forEach((node) => {
+      node.textContent = '';
+    });
   }
 
   async saveCloudData(_json: string): Promise<void> {

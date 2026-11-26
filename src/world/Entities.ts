@@ -40,6 +40,7 @@ export interface BlockEntity {
   colSpan: number;
   x: number;
   y: number;
+  renderX?: number;
   width: number;
   height: number;
   radius: number; // used for circular bumpers & portals

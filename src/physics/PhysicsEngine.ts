@@ -470,6 +470,9 @@ export class PhysicsEngine {
 
     orb.x = exit.x + exit.width * 0.5;
     orb.y = exit.y + exit.height * 0.5 + orb.radius + 6;
+    if (this.grid.isCellOccupied(exit.col, exit.row + 1, entities)) {
+      orb.y = exit.y + exit.height * 0.5;
+    }
     orb.portalCooldown = PHYSICS_CONFIG.PORTAL_COOLDOWN_S;
     orb.bouncesLeft = Math.min(orb.maxBounces + 6, orb.bouncesLeft + PHYSICS_CONFIG.PORTAL_BONUS_BOUNCES);
 
@@ -541,6 +544,7 @@ export class PhysicsEngine {
       const slideDir = nx >= 0 ? -1 : 1;
       const targetCol = block.col + slideDir;
       if (!this.grid.isCellOccupied(targetCol, block.row, entities)) {
+        block.renderX = block.renderX ?? block.x;
         block.col = targetCol;
         block.x = targetCol * PHYSICS_CONFIG.TILE_SIZE + 2;
         this.grid.rebuild(entities);

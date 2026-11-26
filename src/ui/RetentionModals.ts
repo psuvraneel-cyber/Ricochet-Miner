@@ -3,6 +3,7 @@ import { i18n, type TranslationKey } from '../i18n/translations';
 import type { SaveData } from '../sdk/SaveManager';
 import type { RetentionSystem } from '../systems/RetentionSystem';
 import { formatCompact } from '../utils/format';
+import { AdButton } from './AdButton';
 import { svgIcon } from './icons';
 import { UI_ICONS } from './uiAssets';
 
@@ -17,6 +18,14 @@ export class RetentionModals {
   }
 
   showOfflineModal(amount: number, onCollect: (doubled: boolean) => void): void {
+    const doubleBtn = AdButton.renderMarkup({
+      labelHtml: i18n.t('collect_2x'),
+      attrs: 'data-act="collect2x"',
+      className: 'rm-btn rm-btn-gold',
+      style: 'flex:1;min-height:48px;',
+      fallbackMode: 'hide',
+    });
+
     this.backdrop.innerHTML = `
       <div class="arcade-modal-shell">
         <img src="${UI_ICONS.chest}" class="rm-crown-icon" alt="" />
@@ -25,12 +34,12 @@ export class RetentionModals {
         </div>
         <p style="margin:0;text-align:center;color:#cbd5e1;font-size:13px;">${i18n.t('offline_earned')}</p>
         <div class="rm-stat-plaque" style="flex-direction:row;justify-content:center;gap:10px;">
-          <img src="${UI_ICONS.oreValue}" style="width:32px;height:32px;object-fit:contain;" alt="" />
+          <span class="rm-stat-coin-svg">${svgIcon('coin')}</span>
           <span style="font-size:26px;font-weight:900;color:#fbbf24;">${formatCompact(amount)}</span>
         </div>
         <div style="display:flex;gap:8px;">
-          <button class="rm-btn rm-btn-green" style="flex:1.1;min-height:48px;" data-act="collect">${i18n.t('collect')}</button>
-          <button class="rm-btn rm-btn-gold" style="flex:1;min-height:48px;" data-act="collect2x">${svgIcon('adPlay')} ${i18n.t('collect_2x')}</button>
+          <button class="rm-btn rm-btn-green" style="flex:1;min-height:48px;" data-act="collect">${i18n.t('collect')}</button>
+          ${doubleBtn}
         </div>
       </div>
     `;
@@ -102,7 +111,7 @@ export class RetentionModals {
               <div style="font-weight:900;font-size:13px;">${label}</div>
               <div style="font-size:12px;color:#cbd5e1;display:inline-flex;align-items:center;gap:5px;">
                 ${q.progress}/${q.target}
-                <img src="${UI_ICONS.oreValue}" style="width:15px;height:15px;object-fit:contain;" alt="" />
+                ${svgIcon('coin')}
                 ${spec?.rewardCoins ?? 0}
               </div>
             </div>

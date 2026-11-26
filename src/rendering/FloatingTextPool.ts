@@ -66,12 +66,14 @@ export class FloatingTextPool {
     for (let i = 0; i < TEXT_POOL_SIZE; i++) {
       const t = this.pool[i];
       if (!t.active) continue;
-      const alpha = Math.min(1, (t.life / t.maxLife) * 1.4);
+      const elapsed = 1 - t.life / t.maxLife;
+      const pop = elapsed < 0.16 ? 0.85 + (elapsed / 0.16) * 0.3 : 1.15 - (elapsed - 0.16) * 0.18;
+      const alpha = Math.min(1, (t.life / t.maxLife) * 1.45);
       ctx.globalAlpha = alpha;
-      const fontSize = Math.round(15 * t.scale);
-      ctx.font = `800 ${fontSize}px system-ui, sans-serif`;
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = 'rgba(9, 13, 22, 0.9)';
+      const fontSize = Math.round(16 * t.scale * pop);
+      ctx.font = `700 ${fontSize}px 'Lilita One', 'Fredoka', system-ui, sans-serif`;
+      ctx.lineWidth = 3.5;
+      ctx.strokeStyle = 'rgba(24, 18, 16, 0.92)';
       ctx.strokeText(t.text, t.x, t.y);
       ctx.fillStyle = t.color;
       ctx.fillText(t.text, t.x, t.y);

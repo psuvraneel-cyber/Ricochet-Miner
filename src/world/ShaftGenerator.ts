@@ -58,10 +58,12 @@ export class ShaftGenerator {
     const endRow = startRow + PHYSICS_CONFIG.CHUNK_ROWS - 1;
     const { tntChance, bumperChance } = calcLuckWeights(this.options.luckLevel);
 
-    // Reserve top 3 rows of chunk 0 for launcher clearance
-    const firstPlayableRow = chunkIndex === 0 ? 3 : startRow;
+    // Reserve top 3 rows of chunk 0 for launcher clearance, and keep Row 3 completely empty on Run 1 FTUE
+    const isFirstRunFtueChunk = chunkIndex === 0 && this.options.baseRowOffset === 0;
+    const firstPlayableRow = chunkIndex === 0 ? (isFirstRunFtueChunk ? 4 : 3) : startRow;
 
     for (let row = firstPlayableRow; row <= endRow; row++) {
+      if (isFirstRunFtueChunk && row <= 3) continue;
       const globalRow = this.options.baseRowOffset + row;
       const depthMeters = globalRow * PHYSICS_CONFIG.METERS_PER_ROW;
       const biome = this.getBiomeForRow(globalRow);

@@ -1,11 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AudioEngine } from '../src/audio/AudioEngine';
 import { UPGRADES, BIOMES } from '../src/config/gameConfig';
 import { StateMachine } from '../src/core/StateMachine';
 import { TRANSLATIONS, type SupportedLocale } from '../src/i18n/translations';
 import { SpriteAtlas } from '../src/rendering/SpriteAtlas';
-import { PlatformSDKManager, type AdResult, type IPortalAdapter } from '../src/sdk/PlatformSDK';
+import { PlatformSDK, PlatformSDKManager, type AdResult, type IPortalAdapter } from '../src/sdk/PlatformSDK';
+import { CrazyGamesAdapter } from '../src/sdk/adapters/CrazyGamesAdapter';
 import { SaveManager, createDefaultSave } from '../src/sdk/SaveManager';
+import { AdButton } from '../src/ui/AdButton';
 
 function createSpyAdapter(opts: { adResult?: AdResult; delayMs?: number } = {}) {
   const calls: string[] = [];
@@ -215,5 +217,115 @@ describe('Portal SDK & QA Compliance', () => {
     await expect(atlas.loadAll()).resolves.toBeUndefined();
     expect(atlas.getBlockSprite('strata', BIOMES[0], 0, 0)).toBeNull();
     expect(atlas.getLogoEmblemUrl()).toContain('logo_emblem');
+  });
+
+  it('falls back cleanly after 3000ms init timeout and tracks adblock/adError state', async () => {
+    vi.useFakeTimers();
+    try {
+      const hangingAdapter: IPortalAdapter = {
+        ...createSpyAdapter().adapter,
+        init: () => new Promise<void>(() => {}), // Never resolves
+      };
+      const sdk = new PlatformSDKManager(hangingAdapter);
+      const initPromise = sdk.init();
+      await vi.advanceTimersByTimeAsync(3100);
+      await initPromise;
+
+      // Fell back cleanly to offline fallback mode so game still boots without ads
+      expect(sdk.isOfflineFallback).toBe(true);
+      expect(sdk.canShowRewardedAds()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const { adapter: adErrAdapter } = createSpyAdapter({
+      adResult: { rewarded: false, reason: 'error' },
+    });
+    const sdk2 = new PlatformSDKManager(adErrAdapter);
+    await sdk2.init();
+    expect(sdk2.canShowRewardedAds()).toBe(true);
+
+    let notified = 0;
+    const unsub = sdk2.onAdAvailabilityChange(() => {
+      notified++;
+    });
+    const res = await sdk2.showRewardedAd('rv_double_run');
+    expect(res.rewarded).toBe(false);
+    expect(sdk2.canShowRewardedAds()).toBe(false);
+    expect(notified).toBeGreaterThanOrEqual(1);
+    unsub();
+  });
+
+  it('enforces CrazyGamesAdapter disabled env blocking & 60s banner refresh throttle', async () => {
+    const originalWindow = (globalThis as Record<string, unknown>).window;
+    const bannerCalls: string[] = [];
+    const gameCalls: string[] = [];
+
+    (globalThis as Record<string, unknown>).window = {
+      CrazyGames: {
+        SDK: {
+          environment: 'crazygames',
+          init: async () => {},
+          ad: { hasAdblock: async () => false },
+          game: { gameplayStart: () => gameCalls.push('start') },
+          banner: {
+            requestResponsiveBanner: (id: string) => bannerCalls.push(`req:${id}`),
+            clearAllBanners: () => bannerCalls.push('clearAll'),
+          },
+        },
+      },
+    };
+
+    try {
+      const cg = new CrazyGamesAdapter();
+      await cg.init();
+      expect(cg.isDisabled()).toBe(false);
+
+      cg.requestBanner('rm-shop-banner-slot');
+      cg.requestBanner('rm-shop-banner-slot'); // Throttled inside 60s window
+      expect(bannerCalls).toEqual(['req:rm-shop-banner-slot']);
+
+      cg.clearAllBanners();
+      expect(bannerCalls).toContain('clearAll');
+
+      // Disabled environment blocks all live SDK calls
+      (
+        (globalThis as Record<string, unknown>).window as {
+          CrazyGames: { SDK: { environment: string } };
+        }
+      ).CrazyGames.SDK.environment = 'disabled';
+      const cgDisabled = new CrazyGamesAdapter();
+      await cgDisabled.init();
+      expect(cgDisabled.isDisabled()).toBe(true);
+      cgDisabled.gameplayStart();
+      expect(gameCalls).toEqual([]);
+    } finally {
+      (globalThis as Record<string, unknown>).window = originalWindow;
+    }
+  });
+
+  it('renders AdButton dynamically: hides when unavailable or swaps cleanly to coin fallback', () => {
+    vi.spyOn(PlatformSDK, 'canShowRewardedAds').mockReturnValue(false);
+
+    expect(
+      AdButton.renderMarkup({
+        labelHtml: 'DOUBLE (AD)',
+        attrs: 'data-test="double"',
+        fallbackMode: 'hide',
+      })
+    ).toBe('');
+
+    const coinHtml = AdButton.renderMarkup({
+      labelHtml: 'BONUS COIN (AD)',
+      attrs: 'data-test="bonus"',
+      fallbackMode: 'coin_alt',
+      coinAltHtml: '100 COINS',
+      coinAltAttrs: 'data-test="coin-buy"',
+    });
+    expect(coinHtml).toContain('100 COINS');
+    expect(coinHtml).not.toContain('AD');
+    expect(coinHtml).not.toContain('data-ad-cta');
+
+    vi.restoreAllMocks();
   });
 });

@@ -4,7 +4,7 @@ import path from 'node:path';
 import JSZip from 'jszip';
 
 const PORTALS = ['crazygames', 'poki', 'gamedistribution', 'yandex', 'standalone'];
-const MAX_BUNDLE_BYTES = 5 * 1024 * 1024; // 5 MB strict ceiling
+const MAX_BUNDLE_BYTES = 20 * 1024 * 1024; // 20 MB CrazyGames limit
 
 const arg = process.argv[2] || 'all';
 const targets = arg === 'all' ? PORTALS : [arg];
@@ -75,7 +75,7 @@ function auditDist(platform, distDir) {
     throw new Error(`[${platform}] Missing root index.html in ${distDir}`);
   }
   if (totalBytes > MAX_BUNDLE_BYTES) {
-    throw new Error(`[${platform}] Unzipped size ${totalBytes} exceeds 5 MB limit`);
+    throw new Error(`[${platform}] Unzipped size ${totalBytes} exceeds 20 MB limit`);
   }
   return totalBytes;
 }
@@ -107,7 +107,7 @@ async function buildPortal(platform) {
   });
 
   if (zipBuffer.length > MAX_BUNDLE_BYTES) {
-    throw new Error(`[${platform}] ZIP size ${zipBuffer.length} exceeds 5 MB limit`);
+    throw new Error(`[${platform}] ZIP size ${zipBuffer.length} exceeds 20 MB limit`);
   }
 
   const zipName = `ricochet-miner-${platform === 'gamedistribution' ? 'gd' : platform}.zip`;

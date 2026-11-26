@@ -10,6 +10,14 @@ export type MusicVolumeLevel = 'off' | 'low' | 'high';
 // Mix mastering defaults: music sits roughly -8 dB below SFX so ricochets & TNT blasts stay crisp
 const SFX_DEFAULT_GAIN = 0.75;
 const MUSIC_DEFAULT_GAIN = 0.28;
+const MAX_ACTIVE_SFX_VOICES = 16;
+const DEFAULT_THROTTLE_MS = 55;
+
+interface ActiveVoiceEntry {
+  stopNode: AudioScheduledSourceNode;
+  gainNode: GainNode;
+  startedAt: number;
+}
 
 export class AudioEngine {
   private ctx: AudioContext | null = null;
@@ -32,6 +40,8 @@ export class AudioEngine {
   private gestureUnlocked = false;
   private resumeArmed = false;
   private boundResumeHandler: (() => void) | null = null;
+  private lastSoundTimes = new Map<string, number>();
+  private activeVoices: ActiveVoiceEntry[] = [];
 
   constructor(
     initialMuted: boolean = false,
@@ -198,6 +208,88 @@ export class AudioEngine {
       this.ctx.resume().catch(() => {});
     }
     return { ctx: this.ctx, out: this.sfxGain };
+  }
+
+  private getNowMs(): number {
+    return typeof performance !== 'undefined' && typeof performance.now === 'function'
+      ? performance.now()
+      : Date.now();
+  }
+
+  /**
+   * Enforces a per-sound rate throttle (default 55ms) so simultaneous multi-orb hits
+   * cannot saturate the audio graph or clip output levels.
+   */
+  playSoundThrottled(soundId: string, minIntervalMs: number = DEFAULT_THROTTLE_MS): boolean {
+    const now = this.getNowMs();
+    const last = this.lastSoundTimes.get(soundId) ?? -Infinity;
+    if (now - last < minIntervalMs) {
+      return false;
+    }
+    this.lastSoundTimes.set(soundId, now);
+    return true;
+  }
+
+  getActiveVoiceCount(): number {
+    return this.activeVoices.length;
+  }
+
+  private createPannedDest(ctx: AudioContext, out: GainNode, worldX?: number): AudioNode {
+    if (typeof worldX !== 'number' || typeof ctx.createStereoPanner !== 'function') {
+      return out;
+    }
+    const pan = Math.max(-0.65, Math.min(0.65, ((worldX / 540) * 2 - 1) * 0.65));
+    const panner = ctx.createStereoPanner();
+    panner.pan.setValueAtTime(pan, ctx.currentTime);
+    panner.connect(out);
+    return panner;
+  }
+
+  private registerVoice(
+    ctx: AudioContext,
+    stopNode: AudioScheduledSourceNode,
+    gainNode: GainNode,
+    extraNodes: AudioNode[] = []
+  ): void {
+    while (this.activeVoices.length >= MAX_ACTIVE_SFX_VOICES) {
+      const oldest = this.activeVoices.shift();
+      if (oldest) {
+        try {
+          const t = ctx.currentTime;
+          oldest.gainNode.gain.cancelScheduledValues(t);
+          oldest.gainNode.gain.setValueAtTime(oldest.gainNode.gain.value, t);
+          oldest.gainNode.gain.linearRampToValueAtTime(0.0001, t + 0.015);
+          oldest.stopNode.stop(t + 0.02);
+        } catch {
+          // already ended
+        }
+      }
+    }
+
+    const entry: ActiveVoiceEntry = {
+      stopNode,
+      gainNode,
+      startedAt: ctx.currentTime,
+    };
+    this.activeVoices.push(entry);
+
+    const prevOnEnded = (stopNode as { onended?: (() => void) | null }).onended;
+    (stopNode as { onended?: (() => void) | null }).onended = () => {
+      prevOnEnded?.();
+      const idx = this.activeVoices.indexOf(entry);
+      if (idx !== -1) this.activeVoices.splice(idx, 1);
+      try {
+        stopNode.disconnect();
+        gainNode.disconnect();
+        for (const n of extraNodes) n.disconnect();
+      } catch {
+        // ignore safe disconnect
+      }
+    };
+  }
+
+  private pitchJitter(spread: number = 0.06): number {
+    return 1 + (Math.random() * 2 - 1) * spread;
   }
 
   private syncGainLevels(smoothFadeIn: boolean = false): void {
@@ -440,33 +532,43 @@ export class AudioEngine {
     }
   }
 
-  playWallHit(speed: number = 900): void {
+  playWallHit(speed: number = 900, worldX?: number): void {
     const s = this.ensureSfxContext();
-    if (!s) return;
+    if (!s || !this.playSoundThrottled('wallHit', 50)) return;
     const { ctx, out } = s;
+    const dest = this.createPannedDest(ctx, out, worldX);
     const now = ctx.currentTime;
     const norm = Math.max(0.5, Math.min(1.5, speed / 900));
+    const jitter = this.pitchJitter(0.06);
 
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'triangle';
-    osc.frequency.setValueAtTime(1450 * norm, now);
-    osc.frequency.exponentialRampToValueAtTime(780 * norm, now + 0.045);
+    osc.frequency.setValueAtTime(1450 * norm * jitter, now);
+    osc.frequency.exponentialRampToValueAtTime(780 * norm * jitter, now + 0.045);
     gain.gain.setValueAtTime(0.055 * norm, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
-    osc.connect(gain).connect(out);
+    osc.connect(gain).connect(dest);
+    this.registerVoice(ctx, osc, gain, dest !== out ? [dest] : []);
     osc.start(now);
     osc.stop(now + 0.055);
   }
 
-  playHit(combo: number, cleaved: boolean, isGranite: boolean = false, speed: number = 900): void {
+  playHit(
+    combo: number,
+    cleaved: boolean,
+    isGranite: boolean = false,
+    speed: number = 900,
+    worldX?: number
+  ): void {
     const s = this.ensureSfxContext();
-    if (!s) return;
+    if (!s || !this.playSoundThrottled('blockHit', 55)) return;
     const { ctx, out } = s;
+    const dest = this.createPannedDest(ctx, out, worldX);
     const now = ctx.currentTime;
     const idx = Math.min(PENTATONIC_HZ.length - 1, Math.max(0, combo % PENTATONIC_HZ.length));
     const octaveShift = combo >= PENTATONIC_HZ.length ? 1.5 : 1;
-    const freq = PENTATONIC_HZ[idx] * octaveShift;
+    const freq = PENTATONIC_HZ[idx] * octaveShift * this.pitchJitter(0.035);
     const velScale = Math.max(0.75, Math.min(1.3, speed / 900));
 
     const osc = ctx.createOscillator();
@@ -476,7 +578,8 @@ export class AudioEngine {
     osc.frequency.exponentialRampToValueAtTime(freq * 0.88, now + 0.085);
     gain.gain.setValueAtTime((cleaved ? 0.14 : 0.11) * velScale, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.095);
-    osc.connect(gain).connect(out);
+    osc.connect(gain).connect(dest);
+    this.registerVoice(ctx, osc, gain, dest !== out ? [dest] : []);
     osc.start(now);
     osc.stop(now + 0.1);
 
@@ -487,7 +590,8 @@ export class AudioEngine {
       shimmer.frequency.setValueAtTime(freq * 1.5, now);
       sGain.gain.setValueAtTime(0.09, now);
       sGain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
-      shimmer.connect(sGain).connect(out);
+      shimmer.connect(sGain).connect(dest);
+      this.registerVoice(ctx, shimmer, sGain);
       shimmer.start(now);
       shimmer.stop(now + 0.12);
     } else if (isGranite && this.noiseBuffer) {
@@ -495,44 +599,48 @@ export class AudioEngine {
       noise.buffer = this.noiseBuffer;
       const filter = ctx.createBiquadFilter();
       filter.type = 'bandpass';
-      filter.frequency.setValueAtTime(620, now);
+      filter.frequency.setValueAtTime(620 * this.pitchJitter(0.06), now);
       filter.Q.setValueAtTime(2.4, now);
       const nGain = ctx.createGain();
       nGain.gain.setValueAtTime(0.14, now);
       nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.075);
-      noise.connect(filter).connect(nGain).connect(out);
+      noise.connect(filter).connect(nGain).connect(dest);
+      this.registerVoice(ctx, noise, nGain, [filter]);
       noise.start(now);
       noise.stop(now + 0.08);
     }
   }
 
-  playCrunch(isGranite: boolean = false): void {
+  playCrunch(isGranite: boolean = false, worldX?: number): void {
     const s = this.ensureSfxContext();
-    if (!s || !this.noiseBuffer) return;
+    if (!s || !this.noiseBuffer || !this.playSoundThrottled('crunch', 55)) return;
     const { ctx, out } = s;
+    const dest = this.createPannedDest(ctx, out, worldX);
     const now = ctx.currentTime;
 
     const noise = ctx.createBufferSource();
     noise.buffer = this.noiseBuffer;
     const filter = ctx.createBiquadFilter();
     filter.type = 'bandpass';
-    filter.frequency.setValueAtTime(isGranite ? 850 : 520, now);
+    filter.frequency.setValueAtTime((isGranite ? 850 : 520) * this.pitchJitter(0.08), now);
     filter.Q.setValueAtTime(isGranite ? 2.8 : 1.4, now);
 
     const gain = ctx.createGain();
     gain.gain.setValueAtTime(isGranite ? 0.18 : 0.11, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
-    noise.connect(filter).connect(gain).connect(out);
+    noise.connect(filter).connect(gain).connect(dest);
+    this.registerVoice(ctx, noise, gain, dest !== out ? [filter, dest] : [filter]);
     noise.start(now);
     noise.stop(now + 0.12);
   }
 
-  playBumper(combo: number = 0): void {
+  playBumper(combo: number = 0, worldX?: number): void {
     const s = this.ensureSfxContext();
-    if (!s) return;
+    if (!s || !this.playSoundThrottled('bumper', 50)) return;
     const { ctx, out } = s;
+    const dest = this.createPannedDest(ctx, out, worldX);
     const now = ctx.currentTime;
-    const lift = 1 + Math.min(8, combo) * 0.03;
+    const lift = (1 + Math.min(8, combo) * 0.03) * this.pitchJitter(0.04);
 
     const body = ctx.createOscillator();
     const bGain = ctx.createGain();
@@ -541,7 +649,8 @@ export class AudioEngine {
     body.frequency.exponentialRampToValueAtTime(1320 * lift, now + 0.11);
     bGain.gain.setValueAtTime(0.16, now);
     bGain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
-    body.connect(bGain).connect(out);
+    body.connect(bGain).connect(dest);
+    this.registerVoice(ctx, body, bGain, dest !== out ? [dest] : []);
     body.start(now);
     body.stop(now + 0.15);
 
@@ -551,25 +660,28 @@ export class AudioEngine {
     ping.frequency.setValueAtTime(1480 * lift, now);
     pGain.gain.setValueAtTime(0.08, now);
     pGain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
-    ping.connect(pGain).connect(out);
+    ping.connect(pGain).connect(dest);
+    this.registerVoice(ctx, ping, pGain);
     ping.start(now);
     ping.stop(now + 0.09);
   }
 
-  playExplosion(): void {
+  playExplosion(worldX?: number): void {
     const s = this.ensureSfxContext();
-    if (!s) return;
+    if (!s || !this.playSoundThrottled('explosion', 75)) return;
     const { ctx, out } = s;
+    const dest = this.createPannedDest(ctx, out, worldX);
     const now = ctx.currentTime;
 
     const sub = ctx.createOscillator();
     const subGain = ctx.createGain();
     sub.type = 'sine';
-    sub.frequency.setValueAtTime(115, now);
+    sub.frequency.setValueAtTime(115 * this.pitchJitter(0.06), now);
     sub.frequency.exponentialRampToValueAtTime(26, now + 0.34);
     subGain.gain.setValueAtTime(0.32, now);
     subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
-    sub.connect(subGain).connect(out);
+    sub.connect(subGain).connect(dest);
+    this.registerVoice(ctx, sub, subGain, dest !== out ? [dest] : []);
     sub.start(now);
     sub.stop(now + 0.37);
 
@@ -578,31 +690,35 @@ export class AudioEngine {
       noise.buffer = this.noiseBuffer;
       const filter = ctx.createBiquadFilter();
       filter.type = 'lowpass';
-      filter.frequency.setValueAtTime(1100, now);
+      filter.frequency.setValueAtTime(1150, now);
       filter.frequency.exponentialRampToValueAtTime(110, now + 0.35);
 
       const nGain = ctx.createGain();
       nGain.gain.setValueAtTime(0.28, now);
       nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.38);
-      noise.connect(filter).connect(nGain).connect(out);
+      noise.connect(filter).connect(nGain).connect(dest);
+      this.registerVoice(ctx, noise, nGain, [filter]);
       noise.start(now);
       noise.stop(now + 0.39);
     }
   }
 
-  playCoin(): void {
+  playCoin(worldX?: number): void {
     const s = this.ensureSfxContext();
-    if (!s) return;
+    if (!s || !this.playSoundThrottled('coin', 55)) return;
     const { ctx, out } = s;
+    const dest = this.createPannedDest(ctx, out, worldX);
     const now = ctx.currentTime;
+    const jit = this.pitchJitter(0.04);
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(1174.66, now);
-    osc.frequency.setValueAtTime(1567.98, now + 0.045);
+    osc.frequency.setValueAtTime(1174.66 * jit, now);
+    osc.frequency.setValueAtTime(1567.98 * jit, now + 0.045);
     gain.gain.setValueAtTime(0.085, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
-    osc.connect(gain).connect(out);
+    osc.connect(gain).connect(dest);
+    this.registerVoice(ctx, osc, gain, dest !== out ? [dest] : []);
     osc.start(now);
     osc.stop(now + 0.14);
   }
