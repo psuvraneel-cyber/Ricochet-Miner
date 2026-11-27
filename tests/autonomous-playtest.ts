@@ -12,7 +12,7 @@ import { ProgressionSystem } from '../src/systems/ProgressionSystem';
 import { RetentionSystem } from '../src/systems/RetentionSystem';
 import { SkinSystem } from '../src/systems/SkinSystem';
 import { degToRad } from '../src/utils/math';
-import type { BlockEntity, Orb } from '../src/world/Entities';
+import type { BlockEntity, CompanionDroneState, Orb } from '../src/world/Entities';
 import { ShaftGenerator } from '../src/world/ShaftGenerator';
 
 export interface SimulationMetrics {
@@ -40,25 +40,25 @@ function createSimAdapter() {
     name: 'sim',
     supportsBanners: false,
     hideFullscreenButton: false,
-    async init() {},
-    loadingStart() {},
-    loadingStop() {},
+    async init() { },
+    loadingStart() { },
+    loadingStop() { },
     gameplayStart() {
       starts++;
     },
     gameplayStop() {
       stops++;
     },
-    happytime() {},
+    happytime() { },
     async showMidgameAd(): Promise<AdResult> {
       return { rewarded: true, reason: 'finished' };
     },
     async showRewardedAd(): Promise<AdResult> {
       return { rewarded: true, reason: 'finished' };
     },
-    requestBanner() {},
-    clearBanner() {},
-    async saveCloudData() {},
+    requestBanner() { },
+    clearBanner() { },
+    async saveCloudData() { },
     async loadCloudData() {
       return null;
     },
@@ -111,6 +111,9 @@ function chooseUpgradeStrategy(
     'multiorb',
     'orbsize',
     'luck',
+    'dronebay',
+    'relicforge',
+    'overclockcore',
   ];
 
   // Keep buying while affordable upgrades provide strong value, prioritizing weakest lagging stats
@@ -128,17 +131,19 @@ function chooseUpgradeStrategy(
       if (!economy.canAfford(save, id)) continue;
       const lvl = economy.getLevel(save, id);
       const cost = economy.getUpgradeCost(save, id);
-      // Weight factor: keep damage & orevalue leading, multiorb very attractive when affordable
+      // Weight factor: keep damage & orevalue leading, multiorb very attractive when affordable, late-game sinks scale smoothly
       const weight =
         id === 'damage'
           ? 0.65
           : id === 'orevalue'
-          ? 0.72
-          : id === 'multiorb'
-          ? 0.55
-          : id === 'bounces'
-          ? 0.85
-          : 1.1;
+            ? 0.72
+            : id === 'multiorb'
+              ? 0.55
+              : id === 'bounces'
+                ? 0.85
+                : id === 'dronebay' || id === 'overclockcore'
+                  ? 0.95
+                  : 1.1;
       const targetBias = id === 'damage' && lvl < (unlockedBiomeIdx + 1) * 5 ? 0.6 : 1.0;
       const score = cost * weight * targetBias;
       if (score < bestScore) {
@@ -325,10 +330,45 @@ export function runAutonomousPlaytest(minRuns: number = 60): SimulationMetrics {
       ),
     ];
 
+    const drone: CompanionDroneState = {
+      active: economy.isDroneUnlocked(save),
+      x: PHYSICS_CONFIG.SHAFT_WIDTH * 0.5,
+      y: 120,
+      bobPhase: 0,
+      propRotation: 0,
+      fireCooldown: 0,
+      targetX: null,
+      targetY: null,
+      beamTimer: 0,
+    };
+    const droneStats = economy.getDroneStats(save);
+    let overclockTimer = 0;
+    let overclockUsed = false;
+    let magPulseCd = 2.0;
+    let simCamY = 0;
+
     const dt = PHYSICS_CONFIG.FIXED_DT;
     const maxTicks = 120 * 40; // max 40s per run safety bound
     for (let tick = 0; tick < maxTicks; tick++) {
       runElapsedS += dt;
+      if (overclockTimer > 0) overclockTimer = Math.max(0, overclockTimer - dt);
+      if (magPulseCd > 0) magPulseCd = Math.max(0, magPulseCd - dt);
+      if (!overclockUsed && runElapsedS >= 2.2) {
+        overclockUsed = true;
+        overclockTimer = economy.getOverclockDurationS(save, 0);
+      }
+      if (magPulseCd <= 0) {
+        magPulseCd = economy.getMagPulseCooldownS(save);
+        physics.triggerMagPulseSlam(
+          orbs,
+          entities,
+          [],
+          save.upgrades.orevalue,
+          save.upgrades.orbsize,
+          save.prestigeLevel,
+          save.ascensionTier
+        );
+      }
       if (pendingOrbs > 0) {
         volleyTimer += dt;
         if (volleyTimer >= PHYSICS_CONFIG.MULTI_ORB_INTERVAL_S) {
@@ -347,13 +387,33 @@ export function runAutonomousPlaytest(minRuns: number = 60): SimulationMetrics {
         }
       }
 
+      const mods = {
+        bladePassive: skins.getEquippedSkin(save).passiveId,
+        overclockActive: overclockTimer > 0,
+        activeWeakPointCoreIndex: Math.floor(runElapsedS / 4.5) % 3,
+      };
       physics.step(
         dt,
         orbs,
         entities,
         save.upgrades.orevalue,
         save.upgrades.orbsize,
-        save.prestigeLevel
+        save.prestigeLevel,
+        save.ascensionTier,
+        mods
+      );
+      physics.stepCompanionDrone(
+        dt,
+        drone,
+        entities,
+        [],
+        simCamY,
+        droneStats,
+        save.upgrades.orevalue,
+        save.upgrades.orbsize,
+        save.prestigeLevel,
+        save.ascensionTier,
+        mods
       );
 
       let lowestY = 0;
@@ -366,8 +426,8 @@ export function runAutonomousPlaytest(minRuns: number = 60): SimulationMetrics {
       }
 
       if (anyAlive) {
-        const camY = Math.max(0, lowestY - PHYSICS_CONFIG.CAMERA_LOOKAHEAD_Y);
-        const bottomRow = Math.ceil((camY + 1200) / PHYSICS_CONFIG.TILE_SIZE);
+        simCamY = Math.max(0, lowestY - PHYSICS_CONFIG.CAMERA_LOOKAHEAD_Y);
+        const bottomRow = Math.ceil((simCamY + 1200) / PHYSICS_CONFIG.TILE_SIZE);
         generator.ensureChunksUpToRow(bottomRow, entities);
         const depth =
           selectedBiome.startDepthM +

@@ -25,6 +25,7 @@ export class ShaftGenerator {
   private rng: SeededRNG;
   private options: ShaftGeneratorOptions;
   private spawnedBossGates = new Set<number>();
+  private lastPickupRow = -10;
 
   constructor(options: ShaftGeneratorOptions) {
     this.options = options;
@@ -114,9 +115,25 @@ export class ShaftGenerator {
       // Standard procedural row
       const rowDensity = Math.min(0.72, 0.48 + biome.index * 0.04);
       let spawnedPortalInRow = false;
+      let spawnedPickupInRow = false;
 
       for (let col = 0; col < PHYSICS_CONFIG.GRID_COLS; col++) {
-        if (this.rng.next() > rowDensity) continue;
+        if (this.rng.next() > rowDensity) {
+          if (
+            row >= 7 &&
+            !spawnedPickupInRow &&
+            row - this.lastPickupRow >= 5 &&
+            this.rng.next() < 0.085
+          ) {
+            spawnedPickupInRow = true;
+            this.lastPickupRow = row;
+            const pRoll = this.rng.next();
+            const pickupKind: EntityKind =
+              pRoll < 0.4 ? 'pickup_split' : pRoll < 0.75 ? 'pickup_magnet' : 'pickup_overclock';
+            entities.push(this.createBlock(pickupKind, col, row, depthMeters, biome.index));
+          }
+          continue;
+        }
 
         const roll = this.rng.next();
         let kind: EntityKind = 'strata';
@@ -244,7 +261,16 @@ export class ShaftGenerator {
       y,
       width,
       height,
-      radius: kind === 'bumper' ? 22 : kind === 'portal_entry' || kind === 'portal_exit' ? 20 : 0,
+      radius:
+        kind === 'bumper'
+          ? 22
+          : kind === 'portal_entry' || kind === 'portal_exit'
+          ? 20
+          : kind === 'pickup_split' || kind === 'pickup_magnet' || kind === 'pickup_overclock'
+          ? 18
+          : kind === 'boss_shard'
+          ? 15
+          : 0,
       hp,
       maxHp: hp,
       depthMeters,

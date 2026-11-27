@@ -28,15 +28,23 @@ export interface IPortalAdapter {
   clearAllBanners?(): void;
   hasAdblock?(): Promise<boolean>;
   isDisabled?(): boolean;
+  supportsLeaderboards?(): boolean;
+  getUser?(): Promise<{ username: string; avatarUrl?: string } | null>;
+  submitLeaderboardScore?(score: number): void;
+  showLeaderboard?(): void;
   saveCloudData(json: string): Promise<void>;
   loadCloudData(): Promise<string | null>;
   getLocale(): string;
   getDeviceType(): 'desktop' | 'mobile' | 'tablet';
   getServerTimeMs(): number;
+  isPlatformMuted?(): boolean;
+  onPlatformMuteChange?(cb: (muted: boolean) => void): () => void;
+  setAdCallbacks?(callbacks: { onAdStarted?: () => void; onAdEnded?: () => void }): void;
 }
 
 export type AdLifecycleCallbacks = {
   onBeforeAd: () => void;
+  onAdStarted?: () => void;
   onAfterAd: () => void;
 };
 
@@ -51,6 +59,8 @@ export class PlatformSDKManager {
   private sessionAdsBlocked = false;
   private activeBannerIds = new Set<string>();
   private adListeners = new Set<(available: boolean) => void>();
+  private platformMuteListeners = new Set<(muted: boolean) => void>();
+  private adapterMuteUnsub: (() => void) | null = null;
   private playstate: ActivePlaystate = 'IDLE';
   private lifecycle: AdLifecycleCallbacks = {
     onBeforeAd: () => {},
@@ -59,6 +69,7 @@ export class PlatformSDKManager {
 
   constructor(adapter?: IPortalAdapter) {
     this.adapter = adapter ?? this.createAdapter();
+    this.bindAdapterHooks();
     this.rewardedAdsAvailable = this.computeInitialAdSupport();
   }
 
@@ -95,12 +106,66 @@ export class PlatformSDKManager {
     this.sessionAdsBlocked = false;
     this.activeBannerIds.clear();
     this.playstate = 'IDLE';
+    this.bindAdapterHooks();
     this.rewardedAdsAvailable = this.computeInitialAdSupport();
     this.emitAdAvailabilityChanged();
+    this.emitPlatformMuteChanged();
+  }
+
+  private bindAdapterHooks(): void {
+    this.adapterMuteUnsub?.();
+    this.adapterMuteUnsub =
+      this.adapter.onPlatformMuteChange?.(() => {
+        this.emitPlatformMuteChanged();
+      }) ?? null;
+    this.adapter.setAdCallbacks?.({
+      onAdStarted: () => {
+        this.lifecycle.onAdStarted?.();
+      },
+      onAdEnded: () => {
+        // Post-ad restore is handled cleanly in finally { onAfterAd() }
+      },
+    });
+  }
+
+  private emitPlatformMuteChanged(): void {
+    const muted = this.isPlatformMuted();
+    for (const cb of this.platformMuteListeners) {
+      try {
+        cb(muted);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  isPlatformMuted(): boolean {
+    if (this.adapter.isPlatformMuted) {
+      return this.adapter.isPlatformMuted();
+    }
+    if (typeof window !== 'undefined') {
+      try {
+        const search = window.location?.search;
+        if (typeof search === 'string' && new URLSearchParams(search).get('muteAudio') === 'true') {
+          return true;
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return false;
+  }
+
+  onPlatformMuteChange(cb: (muted: boolean) => void): () => void {
+    this.platformMuteListeners.add(cb);
+    return () => {
+      this.platformMuteListeners.delete(cb);
+    };
   }
 
   setAdLifecycleCallbacks(callbacks: AdLifecycleCallbacks): void {
     this.lifecycle = callbacks;
+    this.bindAdapterHooks();
   }
 
   getAdapter(): IPortalAdapter {
@@ -191,6 +256,7 @@ export class PlatformSDKManager {
       }
 
       this.initialized = true;
+      this.emitPlatformMuteChanged();
       await this.refreshAdAvailability();
     })();
 
@@ -345,6 +411,30 @@ export class PlatformSDKManager {
 
   getServerTimeMs(): number {
     return this.adapter.getServerTimeMs();
+  }
+
+  supportsLeaderboards(): boolean {
+    if (this.isOfflineFallback) return false;
+    return this.adapter.supportsLeaderboards?.() ?? false;
+  }
+
+  async getUser(): Promise<{ username: string; avatarUrl?: string } | null> {
+    if (this.isOfflineFallback) return null;
+    try {
+      return (await this.adapter.getUser?.()) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  submitLeaderboardScore(score: number): void {
+    if (this.isOfflineFallback) return;
+    this.adapter.submitLeaderboardScore?.(score);
+  }
+
+  showLeaderboard(): void {
+    if (this.isOfflineFallback) return;
+    this.adapter.showLeaderboard?.();
   }
 }
 

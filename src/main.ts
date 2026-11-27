@@ -1,11 +1,13 @@
-import { AudioEngine } from './audio/AudioEngine';
+import { AudioEngine, type SfxMaterial } from './audio/AudioEngine';
 import { AD_CONFIG } from './config/adConfig';
 import {
   ASCENSION_CONFIG,
   BIOMES,
   PHYSICS_CONFIG,
+  SKILL_CONFIG,
   UPGRADES,
   getMuzzlePosition,
+  type ArtifactId,
   type UpgradeId,
 } from './config/gameConfig';
 import { GameLoop } from './core/GameLoop';
@@ -26,6 +28,8 @@ import {
   resolveSaveConflict,
   type SaveData,
 } from './sdk/SaveManager';
+import type { ChunkSpriteKey } from './rendering/SpriteAtlas';
+import { ArtifactSystem } from './systems/ArtifactSystem';
 import { EconomySystem } from './systems/EconomySystem';
 import { MonetizationSystem } from './systems/MonetizationSystem';
 import { ProgressionSystem } from './systems/ProgressionSystem';
@@ -36,6 +40,7 @@ import { AscensionVictoryModal } from './ui/AscensionVictoryModal';
 import { DebugOverlay } from './ui/DebugOverlay';
 import { FTUEOverlay } from './ui/FTUEOverlay';
 import { HUDController } from './ui/HUDController';
+import { PerkDraftModal } from './ui/PerkDraftModal';
 import { RetentionModals } from './ui/RetentionModals';
 import { RunSummaryModal } from './ui/RunSummaryModal';
 import { SettingsModal } from './ui/SettingsModal';
@@ -44,7 +49,7 @@ import { TitleOverlay } from './ui/TitleOverlay';
 import { injectGameStyles } from './ui/styles';
 import { formatCompact } from './utils/format';
 import { BiomeTheme } from './world/BiomeTheme';
-import type { BlockEntity, CoinDrop, Orb } from './world/Entities';
+import type { BlockEntity, CoinDrop, CompanionDroneState, Orb } from './world/Entities';
 import { ShaftGenerator } from './world/ShaftGenerator';
 
 const COIN_POOL_SIZE = 96;
@@ -68,6 +73,7 @@ class RicochetMinerApp {
   private progression = new ProgressionSystem();
   private retention = new RetentionSystem();
   private skins = new SkinSystem();
+  private artifacts = new ArtifactSystem();
   private monetization = new MonetizationSystem();
   private audio = new AudioEngine(false);
 
@@ -80,6 +86,7 @@ class RicochetMinerApp {
   private retentionModals!: RetentionModals;
   private settingsModal!: SettingsModal;
   private titleOverlay!: TitleOverlay;
+  private perkDraftModal!: PerkDraftModal;
   private input!: InputManager;
   private loop!: GameLoop;
   private generator!: ShaftGenerator;
@@ -118,9 +125,35 @@ class RicochetMinerApp {
   private skipNextMidgameBreak = false;
   private pausedFromState: 'AIMING' | 'RUNNING' | null = null;
   private bossActiveForAudio = false;
+  private lastMusicBiomeIdx = -1;
+  private lastMusicState = '';
+  private lastMusicBoss = false;
+  private volleySpawnIndex = 0;
   private pendingBiomeUnlock: { biomeIndex: number; unlockedSkinNames: string[] } | null = null;
   private turretRecoil = 0;
   private timeS = 0;
+  private magPulseCooldownS = 0;
+  private overclockCharges = 1;
+  private overclockTimerS = 0;
+  private overclockBreakCounter = 0;
+  private magPulseShockwaves: Array<{ x: number; y: number; radius: number; maxRadius: number; alpha: number }> = [];
+  private lightningArcs: Array<{ x1: number; y1: number; x2: number; y2: number; alpha: number }> = [];
+  private drone: CompanionDroneState = {
+    active: false,
+    x: 270,
+    y: 120,
+    bobPhase: 0,
+    propRotation: 0,
+    fireCooldown: 0,
+    targetX: null,
+    targetY: null,
+    beamTimer: 0,
+  };
+  private weakPointTimerS = 0;
+  private activeWeakPointCoreIndex: number | null = 0;
+  private bossShardTimerS = 0;
+  private bossPhase2Active = false;
+  private playerName: string | null = null;
 
   constructor() {
     injectGameStyles();
@@ -160,6 +193,11 @@ class RicochetMinerApp {
 
     i18n.setLocale(this.save.settings.localeOverride ?? PlatformSDK.getLocale());
 
+    this.audio.setPlatformMuted(PlatformSDK.isPlatformMuted());
+    PlatformSDK.onPlatformMuteChange((muted) => {
+      this.audio.setPlatformMuted(muted);
+    });
+
     this.audio.setUserMuted(this.save.settings.muted);
     this.audio.setSfxMuted(this.save.settings.sfxMuted);
     this.audio.setMusicVolume(
@@ -170,6 +208,10 @@ class RicochetMinerApp {
     }
     this.retention.refreshDailyQuestsIfNeeded(this.save, nowMs);
     this.retention.syncLoginStreakState(this.save, nowMs);
+
+    PlatformSDK.getUser().then((user) => {
+      if (user?.username) this.playerName = user.username;
+    });
 
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', () => {
@@ -190,6 +232,9 @@ class RicochetMinerApp {
         this.audio.pauseForAd();
         this.input.setLocked(true);
         this.adShield.style.display = 'block';
+      },
+      onAdStarted: () => {
+        this.audio.pauseForAd();
       },
       onAfterAd: () => {
         this.adShield.style.display = 'none';
@@ -229,6 +274,10 @@ class RicochetMinerApp {
       },
     });
 
+    this.stateMachine.onChange(() => {
+      this.syncMusicStateIfChanged();
+    });
+
     this.stateMachine.transition('AIMING');
     this.titleOverlay.hideImmediate();
     this.titleOverlay.showFloatingIntroBanner(this.renderer.getLogoEmblemUrl());
@@ -244,6 +293,7 @@ class RicochetMinerApp {
     const offlineCoins = this.retention.calculateOfflineEarnings(this.save, nowMs);
     if (offlineCoins > 0) {
       this.retentionModals.showOfflineModal(offlineCoins, async (doubled) => {
+        this.audio.unlock();
         let payout = offlineCoins;
         if (doubled) {
           const res = await this.monetization.showRewarded('rv_offline_double');
@@ -253,6 +303,7 @@ class RicochetMinerApp {
             this.showAdFailureToast(res.reason);
           }
         }
+        this.audio.playUpgrade();
         this.save.coins += payout;
         this.save.totalCoinsEarned += payout;
         this.persistSave();
@@ -274,9 +325,44 @@ class RicochetMinerApp {
     this.retentionModals = new RetentionModals(this.uiRoot);
     this.settingsModal = new SettingsModal(this.uiRoot);
     this.titleOverlay = new TitleOverlay(this.uiRoot);
+    this.perkDraftModal = new PerkDraftModal(this.uiRoot);
+
+    const dedicatedSfxSelector =
+      '[data-upg], [data-free-upg], [data-coin-unlock], [data-rv-skin], [data-act="prestige"], [data-perk], [data-qclaim], [data-act="mega"], [data-act="claim"], [data-feat-claim], [data-hud="recall"], [data-hud="magpulse"], [data-hud="overclock"], [data-biome], [data-act="collect"], [data-act="collect2x"], [data-hud="aim-mode"], [data-hud="speed"], [data-equip], [data-act="close"], [data-set="close"]';
+
+    this.uiRoot.addEventListener('pointerdown', (e) => {
+      this.audio.unlock();
+      const stack =
+        typeof document.elementsFromPoint === 'function'
+          ? document.elementsFromPoint(e.clientX, e.clientY)
+          : [e.target as Element | null];
+      for (const el of stack) {
+        if (!el || !(el instanceof HTMLElement)) continue;
+        const btn = el.closest('.rm-btn') as HTMLButtonElement | null;
+        if (btn && (btn.disabled || btn.classList.contains('unaffordable'))) {
+          this.audio.playError();
+          break;
+        }
+      }
+    });
+
+    this.uiRoot.addEventListener('click', (e) => {
+      this.audio.unlock();
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest('[data-act="close"], [data-set="close"]')) {
+        this.audio.playModalClose();
+        return;
+      }
+      if (target.closest(dedicatedSfxSelector)) return;
+      if (target.closest('.rm-btn, [data-interactive="true"], select[data-set="lang"]')) {
+        this.audio.playClick();
+      }
+    });
 
     this.hud = new HUDController(this.uiRoot, {
       onToggleMute: () => {
+        this.audio.unlock();
         this.save.settings.muted = this.audio.toggleMute();
         this.persistSave();
       },
@@ -298,8 +384,10 @@ class RicochetMinerApp {
       onToggleSpeed: () => {
         const next = this.loop.getSpeedMultiplier() > 1 ? 1 : 2;
         this.loop.setSpeedMultiplier(next);
+        this.audio.playClick();
       },
       onRecall: () => {
+        this.audio.playRecall();
         for (const orb of this.orbs) {
           if (orb.alive) {
             this.particles.emitSparks(orb.x, orb.y, 10, '#fde047');
@@ -320,6 +408,7 @@ class RicochetMinerApp {
       onOpenQuests: () => {
         PlatformSDK.gameplayStop();
         this.stateMachine.transition('SHOP');
+        this.audio.playModalOpen();
         this.retentionModals.showDailyQuests(
           this.save,
           this.retention,
@@ -346,6 +435,7 @@ class RicochetMinerApp {
       onOpenDailyLogin: () => {
         PlatformSDK.gameplayStop();
         this.stateMachine.transition('SHOP');
+        this.audio.playModalOpen();
         this.retentionModals.showDailyLogin(
           this.save,
           () => {
@@ -360,10 +450,12 @@ class RicochetMinerApp {
       onOpenElevator: () => {
         PlatformSDK.gameplayStop();
         this.stateMachine.transition('SHOP');
+        this.audio.playModalOpen();
         this.retentionModals.showElevator(
           this.save,
           (biomeIdx) => {
             if (this.progression.selectBiome(this.save, biomeIdx)) {
+              this.audio.playElevator();
               this.persistSave();
               this.resetShaft();
             }
@@ -381,6 +473,12 @@ class RicochetMinerApp {
         } else {
           this.showAdFailureToast(res.reason);
         }
+      },
+      onMagPulse: () => this.activateMagPulse(),
+      onOverclock: () => this.activateOverclock(),
+      onOpenLeaderboard: () => {
+        PlatformSDK.submitLeaderboardScore(Math.floor(this.save.maxDepthMeters));
+        PlatformSDK.showLeaderboard();
       },
     });
 
@@ -409,6 +507,7 @@ class RicochetMinerApp {
   private setupInput(): void {
     this.input = new InputManager(this.canvas, {
       canAim: () => this.stateMachine.state === 'AIMING',
+      isRunning: () => this.stateMachine.state === 'RUNNING',
       getAimMode: () => this.save.settings.aimMode,
       getLauncherPos: () => ({
         x: PHYSICS_CONFIG.SHAFT_WIDTH * 0.5,
@@ -426,6 +525,9 @@ class RicochetMinerApp {
       onAimUpdate: (angleRad, canceled, feedback) => {
         this.aimFeedback = feedback ?? null;
         if (canceled || angleRad === null) {
+          if (feedback?.dragging) {
+            this.audio.playAimCancel();
+          }
           this.aimAngleRad = null;
           this.trajectoryDots = [];
           this.trajectoryImpact = null;
@@ -434,6 +536,9 @@ class RicochetMinerApp {
           this.secondTargetedBlockId = null;
           this.trajectoryBounceIdx = PHYSICS_CONFIG.TRAJECTORY_DOTS;
           return;
+        }
+        if (feedback?.dragging) {
+          this.audio.playAimTick((angleRad * 180) / Math.PI);
         }
         this.aimAngleRad = angleRad;
         const orbR = this.economy.getEffectiveOrbRadius(this.save);
@@ -463,6 +568,8 @@ class RicochetMinerApp {
         }
         this.launchVolley(angleRad);
       },
+      onActiveMagPulse: () => this.activateMagPulse(),
+      onActiveOverclock: () => this.activateOverclock(),
       onQuickRelaunch: () => {
         if (this.stateMachine.state === 'RUN_SUMMARY') {
           this.summary.hide();
@@ -470,6 +577,7 @@ class RicochetMinerApp {
         }
       },
       onToggleMute: () => {
+        this.audio.unlock();
         this.save.settings.muted = this.audio.toggleMute();
         this.persistSave();
       },
@@ -477,9 +585,13 @@ class RicochetMinerApp {
       onBuyUpgradeSlot: (slotIndex) => {
         if (this.stateMachine.state !== 'SHOP') return;
         const spec = UPGRADES[slotIndex];
-        if (spec && this.economy.buyUpgrade(this.save, spec.id)) {
-          this.audio.playUpgrade();
-          this.persistSave();
+        if (spec) {
+          if (this.economy.buyUpgrade(this.save, spec.id)) {
+            this.audio.playUpgrade();
+            this.persistSave();
+          } else {
+            this.audio.playError();
+          }
         }
       },
     });
@@ -504,16 +616,21 @@ class RicochetMinerApp {
         this.audio.playWallHit(Math.hypot(orb.vx, orb.vy), x);
         this.particles.emitSparks(x, y, 5, '#38bdf8');
       },
-      onBlockHit: (orb, block, _dmg, cleaved) => {
+      onBlockHit: (orb, block, _dmg, cleaved, meta) => {
         const cx = block.x + block.width * 0.5;
         const cy = block.y + block.height * 0.5;
-        this.audio.playHit(
-          orb.comboCount,
-          cleaved,
-          block.kind === 'granite' || block.kind === 'boss_armor',
-          Math.hypot(orb.vx, orb.vy),
-          cx
-        );
+        const mat = this.toSfxMaterial(block);
+        if (block.kind === 'boss_armor') {
+          this.audio.playArmorClang(cx);
+        } else if (!meta?.willKill && !meta?.critFired) {
+          this.audio.playHit(
+            orb.comboCount,
+            cleaved,
+            mat,
+            Math.hypot(orb.vx, orb.vy),
+            cx
+          );
+        }
         if (cleaved) {
           this.particles.emitSparks(cx, cy, 10, '#fde047');
         } else {
@@ -540,14 +657,41 @@ class RicochetMinerApp {
         this.save.stats.blocksDestroyed += 1;
         this.retention.recordQuestProgress(this.save, 'blocksDestroyed', 1);
         if (!isTnt) {
-          this.audio.playCrunch(block.kind === 'granite', cx);
+          this.audio.playCrunch(this.toSfxMaterial(block), cx);
+          const chunkKind: ChunkSpriteKey =
+            block.kind === 'ore'
+              ? 'gold'
+              : block.kind === 'frost' || block.biomeIndex === 1 || block.biomeIndex === 3
+              ? 'crystal'
+              : block.biomeIndex === 2
+              ? 'ember'
+              : block.col % 2 === 0
+              ? 'sandstone'
+              : 'slate';
           this.particles.emitRockShards(
             cx,
             cy,
             8,
-            block.kind === 'ore' ? '#fbbf24' : block.kind === 'frost' ? '#7dd3fc' : '#cbd5e1'
+            block.kind === 'ore' ? '#fbbf24' : block.kind === 'frost' ? '#7dd3fc' : '#cbd5e1',
+            chunkKind
           );
           this.particles.emitSmokePuff(cx, cy, 3, '#64748b');
+        } else {
+          this.particles.emitRockShards(cx, cy, 6, '#fb923c', 'tnt_plank');
+        }
+
+        if (this.overclockTimerS <= 0 && this.overclockCharges === 0) {
+          this.overclockBreakCounter++;
+          if (this.overclockBreakCounter >= SKILL_CONFIG.OVERCLOCK_BREAKS_PER_RECHARGE) {
+            this.overclockBreakCounter = 0;
+            this.overclockCharges = 1;
+            this.audio.playOverclockReady();
+            this.floatingText.spawn(cx, cy - 22, 'OVERCLOCK READY!', '#22d3ee', 1.15);
+          }
+        }
+
+        if (block.kind === 'boss_core') {
+          this.audio.duck(200, 0.72);
         }
 
         if (isTnt) {
@@ -563,6 +707,7 @@ class RicochetMinerApp {
           this.juice.triggerHitStop(0.04);
           this.floatingText.spawn(cx, cy - 18, '+1 SHARD!', '#e879f9', 1.25);
           PlatformSDK.happytime();
+          this.openPerkDraft('vault');
         }
 
         if (coins > 0) {
@@ -574,15 +719,69 @@ class RicochetMinerApp {
       onTntExplode: (x, y, radius) => {
         this.audio.playExplosion(x);
         if (this.runTntCount >= 2) {
-          this.audio.duck(500);
+          this.audio.duck(350, 0.55);
         }
         this.juice.triggerHitStop(0.035);
         this.juice.triggerShake(7.5);
         this.juice.triggerVignette(0.35);
         this.juice.addShockwave(x, y, radius, '#fb923c');
         this.particles.emitSparks(x, y, 16, '#fde047');
-        this.particles.emitRockShards(x, y, 10, '#fb923c');
+        this.particles.emitAdditiveSprite(x, y, 'tnt_fireball', '#fb923c', radius * 1.4, 0.34);
+        this.particles.emitAdditiveSprite(x, y, 'shockwave_ring', '#fde047', radius * 1.65, 0.36);
+        this.particles.emitRockShards(x, y, 10, '#fb923c', 'tnt_plank');
         this.particles.emitSmokePuff(x, y, 6, '#334155');
+      },
+      onPickupCollected: (_orb, pickup) => {
+        const cx = pickup.x + pickup.width * 0.5;
+        const cy = pickup.y + pickup.height * 0.5;
+        this.particles.emitAdditiveSprite(cx, cy, 'spark_star', '#38bdf8', 56, 0.28);
+        if (pickup.kind === 'pickup_split') {
+          this.audio.playPickup('split', cx);
+          this.floatingText.spawn(cx, cy - 8, '+SPLIT ORB!', '#22d3ee', 1.2);
+        } else if (pickup.kind === 'pickup_magnet') {
+          this.audio.playPickup('magnet', cx);
+          for (let i = 0; i < this.coins.length; i++) {
+            if (this.coins[i].alive) this.coins[i].magnetized = true;
+          }
+          this.floatingText.spawn(cx, cy - 8, 'MAGNET COIL!', '#fde047', 1.2);
+        } else if (pickup.kind === 'pickup_overclock') {
+          this.audio.playPickup('overclock', cx);
+          this.overclockCharges = Math.min(2, this.overclockCharges + 1);
+          this.activateOverclock();
+          this.floatingText.spawn(cx, cy - 8, 'OVERCLOCK BATTERY!', '#fb923c', 1.25);
+        }
+      },
+      onLightningArc: (x1, y1, x2, y2) => {
+        this.audio.playLightning();
+        this.lightningArcs.push({ x1, y1, x2, y2, alpha: 1 });
+      },
+      onBlockCrit: (block, dmg) => {
+        const cx = block.x + block.width * 0.5;
+        const cy = block.y + block.height * 0.5;
+        this.audio.playCritHit(false, cx);
+        this.floatingText.spawn(cx, cy - 16, `CRIT ${formatCompact(Math.round(dmg))}!`, '#fde047', 1.15);
+      },
+      onBossWeakPointHit: (block) => {
+        const cx = block.x + block.width * 0.5;
+        const cy = block.y + block.height * 0.5;
+        this.audio.playCritHit(true, cx);
+        this.floatingText.spawn(cx, cy - 18, '2.0x WEAK POINT!', '#fde047', 1.2);
+        this.particles.emitAdditiveSprite(cx, cy, 'spark_star', '#fde047', 64, 0.3);
+      },
+      onDroneShot: (x) => {
+        this.audio.playDroneShot(x);
+      },
+      onBossShardHit: (shard) => {
+        this.audio.playHit(0, false, 'boss_shard', 900, shard.x + shard.width * 0.5);
+      },
+      onBossShardSalvaged: (shard) => {
+        this.audio.playBossShardSalvage(shard.x + shard.width * 0.5);
+      },
+      onPassiveProc: (passive, x) => {
+        this.audio.playPassiveCue(passive, x);
+      },
+      onOrbExpired: () => {
+        this.audio.playOrbExpired();
       },
       onBumperHit: (orb, bumper, coins) => {
         const cx = bumper.x + bumper.width * 0.5;
@@ -597,12 +796,12 @@ class RicochetMinerApp {
         this.particles.emitSparks(cx, cy, 10, '#e879f9');
       },
       onLaserFire: (rowY) => {
-        this.audio.playExplosion(PHYSICS_CONFIG.SHAFT_WIDTH * 0.5);
+        this.audio.playLaserBeam(PHYSICS_CONFIG.SHAFT_WIDTH * 0.5);
         this.juice.addLaserBeam(rowY, '#fef08a');
         this.juice.triggerShake(4.5);
       },
       onPortalWarp: (_orb, from, to) => {
-        this.audio.playBumper(6);
+        this.audio.playPortalWarp(to.x + 28);
         this.particles.emitBurst(from.x + 28, from.y + 28, 10, '#a3e635', 60, 180, 4, 0.35);
         this.particles.emitBurst(to.x + 28, to.y + 28, 10, '#f43f5e', 60, 180, 4, 0.35);
         this.floatingText.spawn(to.x + 28, to.y, '+2 WARP!', '#a3e635', 1.15);
@@ -663,8 +862,108 @@ class RicochetMinerApp {
             unlockedSkinNames,
           };
           this.hud.showToast(i18n.t('biome_unlocked_title'));
+          this.openPerkDraft('boss');
         }
         this.persistSave();
+      },
+    });
+  }
+
+  private toSfxMaterial(block: BlockEntity): SfxMaterial {
+    if (block.kind === 'strata' && block.biomeIndex === 1) return 'crystal';
+    switch (block.kind) {
+      case 'granite':
+      case 'ore':
+      case 'frost':
+      case 'boss_core':
+      case 'boss_armor':
+      case 'boss_shard':
+      case 'tnt':
+      case 'vault':
+      case 'splitter':
+      case 'laser':
+        return block.kind;
+      default:
+        return 'strata';
+    }
+  }
+
+  private getPhysicsModifiers() {
+    const skin = this.skins.getEquippedSkin(this.save);
+    return {
+      bladePassive: skin.passiveId,
+      overclockActive: this.overclockTimerS > 0,
+      artifactStacks: this.artifacts.getAllStacks(),
+      relicPotencyMult: this.economy.getRelicPotencyMult(this.save),
+      activeWeakPointCoreIndex: this.activeWeakPointCoreIndex,
+    };
+  }
+
+  private activateMagPulse(): void {
+    if (this.stateMachine.state !== 'RUNNING') return;
+    if (this.magPulseCooldownS > 0) {
+      this.audio.playError();
+      return;
+    }
+    this.magPulseCooldownS = this.economy.getMagPulseCooldownS(this.save);
+    this.audio.playMagPulse();
+    this.juice.triggerShake(5);
+    const pulses = this.physics.triggerMagPulseSlam(
+      this.orbs,
+      this.entities,
+      this.coins,
+      this.save.upgrades.orevalue,
+      this.save.upgrades.orbsize,
+      this.save.prestigeLevel,
+      this.save.ascensionTier,
+      this.getPhysicsModifiers()
+    );
+    for (const p of pulses) {
+      this.magPulseShockwaves.push({
+        x: p.x,
+        y: p.y,
+        radius: 26,
+        maxRadius: p.radius,
+        alpha: 1,
+      });
+    }
+  }
+
+  private activateOverclock(): void {
+    if (this.stateMachine.state !== 'RUNNING') return;
+    if (this.overclockTimerS > 0 || this.overclockCharges <= 0) {
+      this.audio.playError();
+      return;
+    }
+    this.overclockCharges -= 1;
+    const surgeStacks = this.artifacts.getStack('overclock_surge');
+    this.overclockTimerS = this.economy.getOverclockDurationS(this.save, surgeStacks);
+    this.audio.playOverclock();
+    this.juice.triggerShake(4.5);
+    if (surgeStacks > 0) {
+      this.magPulseCooldownS = 0;
+      this.activateMagPulse();
+    }
+  }
+
+  private openPerkDraft(source: 'vault' | 'boss'): void {
+    if (this.stateMachine.state !== 'RUNNING') return;
+    const choices = this.artifacts.rollDraftChoices(3);
+    if (choices.length === 0) return;
+    this.audio.playPerkOpen(source === 'vault' ? 180 : 0);
+    this.stateMachine.transition('PERK_DRAFT');
+    this.perkDraftModal.show({
+      choices,
+      currentStacks: this.artifacts.getAllStacks(),
+      source,
+      onSelect: (id: ArtifactId) => {
+        this.artifacts.addArtifact(id);
+        this.audio.playPerkSelect();
+        this.stateMachine.transition('RUNNING');
+        const hasAliveOrb = this.orbs.some((o) => o.alive);
+        if (!hasAliveOrb && this.pendingVolleyOrbs <= 0 && this.victorySlowMoTimer <= 0) {
+          this.finishRun();
+        }
       },
     });
   }
@@ -672,10 +971,14 @@ class RicochetMinerApp {
   private resetShaft(): void {
     this.entities = [];
     this.orbs.length = 0;
+    this.artifacts.resetRun();
+    this.magPulseShockwaves.length = 0;
+    this.lightningArcs.length = 0;
     for (let i = 0; i < COIN_POOL_SIZE; i++) {
       this.coins[i].alive = false;
     }
     this.cameraY = 0;
+    this.drone.y = 120;
     this.particles.clear();
     this.floatingText.clear();
     this.juice.clear();
@@ -711,6 +1014,12 @@ class RicochetMinerApp {
     this.clearedBiome6ThisRun = false;
     this.victorySlowMoTimer = 0;
     this.pendingVictoryTier = null;
+    this.magPulseCooldownS = 0;
+    this.overclockCharges = 1;
+    this.overclockTimerS = 0;
+    this.overclockBreakCounter = 0;
+    this.weakPointTimerS = 0;
+    this.bossShardTimerS = 0;
 
     if (this.save.overdrivePasses > 0) {
       this.save.overdrivePasses -= 1;
@@ -723,10 +1032,15 @@ class RicochetMinerApp {
     this.volleyAngleRad = angleRad;
     this.pendingVolleyOrbs = totalOrbs - 1;
     this.volleyTimerS = 0;
-    this.spawnLauncherOrb(angleRad);
+    this.volleySpawnIndex = 0;
+    this.spawnLauncherOrb(angleRad, false);
   }
 
-  private spawnLauncherOrb(angleRad: number): void {
+  private spawnLauncherOrb(angleRad: number, isVolleyFollowup: boolean = true): void {
+    if (isVolleyFollowup) {
+      this.volleySpawnIndex++;
+      this.audio.playLaunchVolleyOrb(this.volleySpawnIndex);
+    }
     this.turretRecoil = 1;
     const baseR = this.economy.getEffectiveOrbRadius(this.save);
     const radius = this.isOverdriveRun ? baseR * 1.4 : baseR;
@@ -765,6 +1079,26 @@ class RicochetMinerApp {
     this.orbs.push(orb);
   }
 
+  private syncMusicStateIfChanged(): void {
+    const selectedBiome = this.progression.getSelectedBiome(this.save);
+    const viewDepth =
+      selectedBiome.startDepthM +
+      (this.cameraY / PHYSICS_CONFIG.TILE_SIZE) * PHYSICS_CONFIG.METERS_PER_ROW;
+    const activeBiome = BiomeTheme.getBiomeAtDepth(viewDepth);
+    const st = this.stateMachine.state;
+    if (
+      activeBiome.index === this.lastMusicBiomeIdx &&
+      st === this.lastMusicState &&
+      this.bossActiveForAudio === this.lastMusicBoss
+    ) {
+      return;
+    }
+    this.lastMusicBiomeIdx = activeBiome.index;
+    this.lastMusicState = st;
+    this.lastMusicBoss = this.bossActiveForAudio;
+    this.audio.updateMusicState(activeBiome.index, st, this.bossActiveForAudio);
+  }
+
   private fixedUpdate(dt: number): void {
     this.monetization.updateSessionTime(dt);
     this.timeS += dt;
@@ -772,16 +1106,7 @@ class RicochetMinerApp {
       this.turretRecoil = Math.max(0, this.turretRecoil - dt * 8);
     }
 
-    const selectedBiome = this.progression.getSelectedBiome(this.save);
-    const viewDepth =
-      selectedBiome.startDepthM +
-      (this.cameraY / PHYSICS_CONFIG.TILE_SIZE) * PHYSICS_CONFIG.METERS_PER_ROW;
-    const activeBiome = BiomeTheme.getBiomeAtDepth(viewDepth);
-    this.audio.updateMusicState(
-      activeBiome.index,
-      this.stateMachine.state,
-      this.bossActiveForAudio
-    );
+    this.syncMusicStateIfChanged();
 
     if (this.stateMachine.state !== 'RUNNING') return;
 
@@ -806,6 +1131,89 @@ class RicochetMinerApp {
       }
     }
 
+    if (this.magPulseCooldownS > 0) {
+      this.magPulseCooldownS = Math.max(0, this.magPulseCooldownS - simDt);
+    }
+    if (this.overclockTimerS > 0) {
+      this.overclockTimerS = Math.max(0, this.overclockTimerS - simDt);
+    }
+
+    // Update active Mag-Pulse shockwaves & Lightning Arc fades
+    for (let i = this.magPulseShockwaves.length - 1; i >= 0; i--) {
+      const w = this.magPulseShockwaves[i];
+      w.radius += (w.maxRadius - w.radius) * Math.min(1, simDt * 12);
+      w.alpha -= simDt * 3.1;
+      if (w.alpha <= 0) this.magPulseShockwaves.splice(i, 1);
+    }
+    for (let i = this.lightningArcs.length - 1; i >= 0; i--) {
+      this.lightningArcs[i].alpha -= simDt * 5.2;
+      if (this.lightningArcs[i].alpha <= 0) this.lightningArcs.splice(i, 1);
+    }
+
+    // Multi-Phase Boss: cycle 2.0x Weak-Point reticle & spawn Phase 2 Boss Shards < 50% HP
+    const activeBiomeIdx = this.progression.getSelectedBiome(this.save).index;
+    const aliveCores: BlockEntity[] = [];
+    let bossTotalMax = 0;
+    let bossTotalHp = 0;
+    for (let i = 0; i < this.entities.length; i++) {
+      const e = this.entities[i];
+      if (e.kind === 'boss_core' && e.biomeIndex === activeBiomeIdx) {
+        bossTotalMax += e.maxHp;
+        if (e.alive) {
+          aliveCores.push(e);
+          bossTotalHp += e.hp;
+        }
+      }
+    }
+    const wasPhase2 = this.bossPhase2Active;
+    this.bossPhase2Active =
+      bossTotalMax > 0 &&
+      aliveCores.length > 0 &&
+      bossTotalHp / bossTotalMax <= SKILL_CONFIG.BOSS_PHASE2_HP_RATIO;
+    if (!wasPhase2 && this.bossPhase2Active) {
+      this.audio.playBossPhase2();
+    }
+
+    if (aliveCores.length > 0) {
+      this.weakPointTimerS += simDt;
+      if (
+        this.weakPointTimerS >= SKILL_CONFIG.BOSS_WEAKPOINT_CYCLE_S ||
+        !aliveCores.some((c) => c.bossCoreIndex === this.activeWeakPointCoreIndex)
+      ) {
+        this.weakPointTimerS = 0;
+        const pick = aliveCores[Math.floor(this.timeS * 2) % aliveCores.length];
+        const nextCoreIdx = pick.bossCoreIndex ?? 0;
+        if (nextCoreIdx !== this.activeWeakPointCoreIndex) {
+          this.activeWeakPointCoreIndex = nextCoreIdx;
+          this.audio.playWeakPointLock();
+        }
+      }
+
+      if (this.bossPhase2Active) {
+        this.bossShardTimerS += simDt;
+        if (this.bossShardTimerS >= SKILL_CONFIG.BOSS_SHARD_INTERVAL_S) {
+          this.bossShardTimerS = 0;
+          const src = aliveCores[0];
+          const shard = this.generator['createBlock']
+            ? (this.generator as unknown as {
+                createBlock: (k: 'boss_shard', c: number, r: number, d: number, b: number) => BlockEntity;
+              }).createBlock('boss_shard', src.col, Math.max(2, src.row - 1), src.depthMeters, src.biomeIndex)
+            : null;
+          if (shard) {
+            shard.width = 30;
+            shard.height = 30;
+            shard.radius = 15;
+            shard.x = src.x + src.width * 0.5 - 15;
+            shard.y = src.y - 20;
+            shard.vy = -135;
+            this.entities.push(shard);
+            this.audio.playBossShardSpawn();
+          }
+        }
+      }
+    }
+
+    const modifiers = this.getPhysicsModifiers();
     this.physics.step(
       simDt,
       this.orbs,
@@ -813,7 +1221,23 @@ class RicochetMinerApp {
       this.save.upgrades.orevalue,
       this.save.upgrades.orbsize,
       this.save.prestigeLevel,
-      this.save.ascensionTier
+      this.save.ascensionTier,
+      modifiers
+    );
+
+    const droneStats = this.economy.getDroneStats(this.save);
+    this.physics.stepCompanionDrone(
+      simDt,
+      this.drone,
+      this.entities,
+      this.coins,
+      this.cameraY,
+      droneStats,
+      this.save.upgrades.orevalue,
+      this.save.upgrades.orbsize,
+      this.save.prestigeLevel,
+      this.save.ascensionTier,
+      modifiers
     );
 
     // Track deepest orb & generate chunks ahead
@@ -841,12 +1265,30 @@ class RicochetMinerApp {
       }
     }
 
-    // Update coins (fountain pop -> smooth magnetic arc toward top-left coin HUD pill)
+    // Update coins (fountain pop -> magnetic wake / passive orb vacuum -> top-left coin HUD pill)
+    const wakeStacks = this.artifacts.getStack('magnetic_wake');
+    const passiveMagnetBoost =
+      this.skins.getEquippedSkin(this.save).passiveId === 'midas_magnetism' ? 1.4 : 1.0;
+    const orbMagnetR = (58 + wakeStacks * 55) * passiveMagnetBoost;
+    const orbMagnetRSq = orbMagnetR * orbMagnetR;
+
     const magnetTargetX = 56;
     const magnetTargetY = this.cameraY + 26;
     for (let i = 0; i < this.coins.length; i++) {
       const c = this.coins[i];
       if (!c.alive) continue;
+      if (!c.magnetized) {
+        for (let k = 0; k < this.orbs.length; k++) {
+          const o = this.orbs[k];
+          if (!o.alive) continue;
+          const dx = o.x - c.x;
+          const dy = o.y - c.y;
+          if (dx * dx + dy * dy <= orbMagnetRSq) {
+            c.magnetized = true;
+            break;
+          }
+        }
+      }
       c.life -= dt;
       if (c.life <= 0) {
         c.alive = false;
@@ -908,6 +1350,7 @@ class RicochetMinerApp {
       isFullShaftRun: this.isFullShaftRun,
     });
     this.skins.checkAndUnlockEligibleSkins(this.save);
+    PlatformSDK.submitLeaderboardScore(Math.floor(this.save.maxDepthMeters));
     this.persistSave();
 
     if (this.pendingVictoryTier !== null) {
@@ -1009,6 +1452,7 @@ class RicochetMinerApp {
     if (unlockData) {
       const unlockedSpec = BIOMES[unlockData.biomeIndex];
       if (unlockedSpec) {
+        this.audio.playBiomeUnlock();
         this.retentionModals.showBiomeUnlockModal(
           i18n.t(unlockedSpec.nameKey as TranslationKey),
           unlockedSpec.coinMultiplier,
@@ -1041,6 +1485,7 @@ class RicochetMinerApp {
     this.titleOverlay.dismissFloatingIntroBanner();
     PlatformSDK.gameplayStop();
     this.stateMachine.transition('SHOP');
+    this.audio.playModalOpen();
     const freeCandidate = this.monetization.canOfferFreeUpgrade(this.save.runsCompleted)
       ? this.economy.getCheapestNearlyAffordableUpgrade(
           this.save,
@@ -1141,6 +1586,7 @@ class RicochetMinerApp {
       PlatformSDK.gameplayStop();
     }
     this.stateMachine.transition('SHOP');
+    this.audio.playModalOpen();
     this.achievementsModal.open(
       this.save,
       (featId) => {
@@ -1248,6 +1694,7 @@ class RicochetMinerApp {
   }
 
   private openSettings(fromTitle: boolean): void {
+    this.audio.playModalOpen();
     this.settingsModal.open(this.save, i18n.getLocale(), {
       onToggleSfx: () => {
         this.save.settings.sfxMuted = !this.save.settings.sfxMuted;
@@ -1406,6 +1853,14 @@ class RicochetMinerApp {
       activeGate: gateVisibleOrDamaged
         ? { coresAlive: gateCoresAlive, hp: gateHp, maxHp: gateMaxHp }
         : null,
+      magPulseCooldown: this.magPulseCooldownS,
+      magPulseMaxCooldown: this.economy.getMagPulseCooldownS(this.save),
+      overclockCharges: this.overclockCharges,
+      overclockActiveTimer: this.overclockTimerS,
+      overclockBreakProgress: this.overclockBreakCounter,
+      activePerks: this.artifacts.getActiveEntries(),
+      playerName: this.playerName,
+      supportsLeaderboard: PlatformSDK.supportsLeaderboards(),
     });
 
     this.renderer.render(this.viewport.getLayout(), {
@@ -1418,6 +1873,13 @@ class RicochetMinerApp {
       loadedOrbRadius: this.economy.getEffectiveOrbRadius(this.save),
       loadedOrbCount: this.economy.getEffectiveMultiOrbCount(this.save),
       turretRecoil: this.turretRecoil,
+      heavyTurret: this.save.upgrades.damage > 5,
+      overclockTimer: this.overclockTimerS,
+      magPulseShockwaves: this.magPulseShockwaves,
+      lightningArcs: this.lightningArcs,
+      drone: this.economy.isDroneUnlocked(this.save) ? { ...this.drone, active: true } : null,
+      activeWeakPointCoreIndex: this.activeWeakPointCoreIndex,
+      bossPhase2: this.bossPhase2Active,
       trajectoryDots: this.trajectoryDots,
       trajectoryImpact: this.trajectoryImpact,
       trajectorySecondImpact: this.trajectorySecondImpact,
@@ -1465,6 +1927,7 @@ class RicochetMinerApp {
     if (st !== 'AIMING' && st !== 'RUNNING') return;
     this.pausedFromState = st;
     this.stateMachine.transition('PAUSED');
+    this.audio.playModalOpen();
     PlatformSDK.gameplayStop();
     this.retentionModals.showPauseModal(
       () => this.togglePause(),

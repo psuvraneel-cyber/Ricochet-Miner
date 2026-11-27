@@ -175,7 +175,8 @@ async function createSeededContext(browser, width, height, saveOverrides, record
 async function openGamePage(page, url) {
   await page.goto(url, { waitUntil: 'networkidle' });
   await page.addStyleTag({ content: 'html, body, canvas, * { cursor: none !important; }' });
-  await page.waitForSelector('[data-title="play"]', { state: 'visible', timeout: 10000 });
+  await page.waitForSelector('#game-canvas', { state: 'visible', timeout: 10000 });
+  await page.waitForSelector('[data-hud="shop"]', { state: 'visible', timeout: 10000 });
 }
 
 async function clickSafe(page, selector) {
@@ -201,7 +202,7 @@ async function captureScreenshots(browser, baseUrl) {
   const W = 1280;
   const H = 720;
 
-  // 1. 01_title_screen.png
+  // 1. 01_title_screen.png (live shaft HUD + floating emblem)
   {
     const { context, page } = await createSeededContext(browser, W, H, {
       maxDepthMeters: 492,
@@ -226,8 +227,7 @@ async function captureScreenshots(browser, baseUrl) {
       upgrades: { damage: 4, bounces: 5, multiorb: 3, orbsize: 3, luck: 5, orevalue: 3 },
     });
     await openGamePage(page, baseUrl);
-    await clickSafe(page, '[data-title="play"]');
-    await page.waitForTimeout(450);
+    await page.waitForTimeout(350);
 
     // Pull slightly up-right so trajectory aims down-left/center into FTUE TNT cluster
     await smoothSlingshotRelease(page, W * 0.5, H * 0.36, W * 0.5 + 14, H * 0.36 - 95, 10);
@@ -259,8 +259,7 @@ async function captureScreenshots(browser, baseUrl) {
       equippedSkin: 'magma_cutter',
     });
     await openGamePage(page, baseUrl);
-    await clickSafe(page, '[data-title="play"]');
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(350);
     await clickSafe(page, '[data-hud="shop"]');
     await page.waitForTimeout(250);
     await clickSafe(page, '[data-tab="skins"]');
@@ -278,8 +277,7 @@ async function captureScreenshots(browser, baseUrl) {
       upgrades: { damage: 14, bounces: 16, multiorb: 4, orbsize: 4, luck: 4, orevalue: 4 },
     });
     await openGamePage(page, baseUrl);
-    await clickSafe(page, '[data-title="play"]');
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(350);
     await smoothSlingshotRelease(page, W * 0.5, H * 0.36, W * 0.5 - 8, H * 0.36 - 98, 8);
     // Toggle 2x speed so orbs reach 150m Bedrock Boss Gate quickly
     await page.waitForTimeout(150);
@@ -321,7 +319,7 @@ async function captureScreenshots(browser, baseUrl) {
       claimedAchievements: ['chain_detonator'],
     });
     await openGamePage(page, baseUrl);
-    await clickSafe(page, '[data-title="achievements"]');
+    await clickSafe(page, '[data-hud="achievements"]');
     await page.waitForTimeout(350);
     await page.screenshot({ path: path.join(SHOTS_DIR, '05_hall_of_ascension.png') });
     await context.close();
@@ -366,9 +364,7 @@ async function recordChoreographedVideo(browser, baseUrl, width, height, outFile
   );
 
   await openGamePage(page, baseUrl);
-  // Click PLAY right away (initial boot/title will be trimmed out with -ss 0.9)
-  await clickSafe(page, '[data-title="play"]');
-  await page.waitForTimeout(450);
+  await page.waitForTimeout(350);
 
   const cx = width * 0.5;
   const cy = height * 0.34;
@@ -387,14 +383,18 @@ async function recordChoreographedVideo(browser, baseUrl, width, height, outFile
     ]
   );
 
-  // 0:02 - 0:08.5: Multi-orb ricochet + TNT explosion payoff
-  await page.waitForTimeout(6700);
+  // 0:02 - 0:08.5: Multi-orb ricochet + Mag-Pulse + Overclock payoff
+  await page.waitForTimeout(2400);
+  await page.keyboard.press('KeyE');
+  await page.waitForTimeout(1800);
+  await page.keyboard.press('Space');
+  await page.waitForTimeout(2500);
   const recallBtn = page.locator('[data-hud="recall"]');
   if (await recallBtn.isVisible()) {
     await recallBtn.click();
     await page.waitForTimeout(500);
   }
-  const summaryRelaunch = page.locator('[data-sum="relaunch"]');
+  const summaryRelaunch = page.locator('[data-act="relaunch"]');
   if (await summaryRelaunch.isVisible()) {
     await summaryRelaunch.click();
     await page.waitForTimeout(450);
@@ -405,8 +405,8 @@ async function recordChoreographedVideo(browser, baseUrl, width, height, outFile
   if (await shopBtn.isVisible()) {
     await shopBtn.click();
     await page.waitForTimeout(550);
-    const buyBtn = page.locator('[data-buy]').first();
-    if (await buyBtn.isVisible()) {
+    const buyBtn = page.locator('[data-upg]').first();
+    if (await buyBtn.isVisible() && !(await buyBtn.isDisabled())) {
       await buyBtn.click();
       await page.waitForTimeout(500);
     }
@@ -458,34 +458,75 @@ async function recordChoreographedVideo(browser, baseUrl, width, height, outFile
   const outMp4 = path.join(VIDEOS_DIR, outFileName);
   const scaleW = width === 1280 ? 1920 : width;
   const scaleH = height === 720 ? 1080 : height;
+  const coverName =
+    width >= height ? 'cover_landscape_1920x1080.png' : 'cover_portrait_800x1200.png';
+  const coverPath = path.join(COVERS_DIR, coverName);
 
-  execFileSync(
-    ffmpegPath,
-    [
-      '-y',
-      '-ss',
-      '0.9',
-      '-i',
-      rawWebm,
-      '-t',
-      '19.0',
-      '-vf',
-      `scale=${scaleW}:${scaleH}:flags=lanczos`,
-      '-c:v',
-      'libx264',
-      '-pix_fmt',
-      'yuv420p',
-      '-crf',
-      '20',
-      '-preset',
-      'medium',
-      '-movflags',
-      '+faststart',
-      '-an',
-      outMp4,
-    ],
-    { stdio: 'pipe' }
-  );
+  if (fs.existsSync(coverPath)) {
+    execFileSync(
+      ffmpegPath,
+      [
+        '-y',
+        '-loop',
+        '1',
+        '-t',
+        '1.25',
+        '-i',
+        coverPath,
+        '-ss',
+        '0.9',
+        '-i',
+        rawWebm,
+        '-t',
+        '18.5',
+        '-filter_complex',
+        `[0:v]scale=${scaleW}:${scaleH}:flags=lanczos,fps=30,format=yuv420p,setsar=1[c];[1:v]scale=${scaleW}:${scaleH}:flags=lanczos,fps=30,format=yuv420p,setsar=1[g];[c][g]xfade=transition=fade:duration=0.35:offset=0.9[v]`,
+        '-map',
+        '[v]',
+        '-c:v',
+        'libx264',
+        '-pix_fmt',
+        'yuv420p',
+        '-crf',
+        '20',
+        '-preset',
+        'medium',
+        '-movflags',
+        '+faststart',
+        '-an',
+        outMp4,
+      ],
+      { stdio: 'pipe' }
+    );
+  } else {
+    execFileSync(
+      ffmpegPath,
+      [
+        '-y',
+        '-ss',
+        '0.9',
+        '-i',
+        rawWebm,
+        '-t',
+        '19.0',
+        '-vf',
+        `scale=${scaleW}:${scaleH}:flags=lanczos`,
+        '-c:v',
+        'libx264',
+        '-pix_fmt',
+        'yuv420p',
+        '-crf',
+        '20',
+        '-preset',
+        'medium',
+        '-movflags',
+        '+faststart',
+        '-an',
+        outMp4,
+      ],
+      { stdio: 'pipe' }
+    );
+  }
 
   // Clean temp webm
   if (fs.existsSync(rawWebm)) fs.unlinkSync(rawWebm);

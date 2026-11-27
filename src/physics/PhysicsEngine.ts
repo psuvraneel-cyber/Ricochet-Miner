@@ -1,18 +1,40 @@
 import {
   LASER_DAMAGE_MULT,
   PHYSICS_CONFIG,
+  SKILL_CONFIG,
   TNT_DAMAGE_MULT,
   calcCoinValue,
   calcTntRadiusPx,
+  type ArtifactId,
+  type BladePassiveId,
 } from '../config/gameConfig';
 import { clamp } from '../utils/math';
-import type { BlockEntity, Orb } from '../world/Entities';
+import type { BlockEntity, CoinDrop, CompanionDroneState, Orb } from '../world/Entities';
 import { AntiSoftlock } from './AntiSoftlock';
 import { SpatialGrid } from './SpatialGrid';
 
+export interface PhysicsModifiers {
+  bladePassive?: BladePassiveId;
+  overclockActive?: boolean;
+  artifactStacks?: Partial<Record<ArtifactId, number>>;
+  relicPotencyMult?: number;
+  activeWeakPointCoreIndex?: number | null;
+}
+
+export interface BlockHitMeta {
+  willKill?: boolean;
+  critFired?: boolean;
+}
+
 export interface PhysicsEvents {
   onWallHit?: (orb: Orb, x: number, y: number) => void;
-  onBlockHit?: (orb: Orb, block: BlockEntity, damage: number, cleaved: boolean) => void;
+  onBlockHit?: (
+    orb: Orb,
+    block: BlockEntity,
+    damage: number,
+    cleaved: boolean,
+    meta?: BlockHitMeta
+  ) => void;
   onBlockDestroyed?: (block: BlockEntity, coins: number, isTnt: boolean, isVault: boolean) => void;
   onTntExplode?: (x: number, y: number, radius: number) => void;
   onBumperHit?: (orb: Orb, bumper: BlockEntity, coins: number) => void;
@@ -20,6 +42,14 @@ export interface PhysicsEvents {
   onPortalWarp?: (orb: Orb, from: BlockEntity, to: BlockEntity) => void;
   onBossGateBroken?: (biomeIndex: number, row: number) => void;
   onBossCoreDamaged?: (biomeIndex: number, coreIndex: number, hpLeft: number, maxHp: number) => void;
+  onBossWeakPointHit?: (block: BlockEntity, damage: number) => void;
+  onBossShardHit?: (shard: BlockEntity) => void;
+  onBossShardSalvaged?: (shard: BlockEntity) => void;
+  onPickupCollected?: (orb: Orb, pickup: BlockEntity) => void;
+  onLightningArc?: (x1: number, y1: number, x2: number, y2: number, target: BlockEntity) => void;
+  onBlockCrit?: (block: BlockEntity, damage: number) => void;
+  onDroneShot?: (x: number, y: number, targetX: number, targetY: number) => void;
+  onPassiveProc?: (passive: 'burn' | 'chill' | 'acid' | 'void' | 'gyro', x: number, y: number) => void;
   onOrbExpired?: (orb: Orb) => void;
 }
 
@@ -31,6 +61,8 @@ export class PhysicsEngine {
   private nextOrbId = 1;
   private events: PhysicsEvents;
   private cloneBuffer: Orb[] = [];
+  private wallGyroUsed = new WeakSet<Orb>();
+  private orbBreakCounts = new WeakMap<Orb, number>();
 
   constructor(events: PhysicsEvents = {}) {
     this.events = events;
@@ -97,14 +129,37 @@ export class PhysicsEngine {
     oreValueLevel: number,
     orbSizeLevel: number,
     prestigeLevel: number,
-    ascensionTier: number = 0
+    ascensionTier: number = 0,
+    modifiers: PhysicsModifiers = {}
   ): void {
     this.grid.rebuild(entities);
 
     for (let i = 0; i < entities.length; i++) {
       const block = entities[i];
+      if (!block.alive) continue;
       if (block.hitFlashTimer > 0) {
         block.hitFlashTimer = Math.max(0, block.hitFlashTimer - dt);
+      }
+      if (block.kind === 'boss_shard' && block.vy) {
+        block.y += block.vy * dt;
+        block.x += Math.sin(block.y * 0.03 + block.id) * 18 * dt;
+        block.x = clamp(block.x, 8, PHYSICS_CONFIG.SHAFT_WIDTH - block.width - 8);
+      }
+      if (block.burnTimer && block.burnTimer > 0 && block.burnDps && Number.isFinite(block.hp)) {
+        block.burnTimer = Math.max(0, block.burnTimer - dt);
+        this.damageBlockDirect(
+          block,
+          block.burnDps * dt,
+          entities,
+          oreValueLevel,
+          orbSizeLevel,
+          prestigeLevel,
+          ascensionTier,
+          block.burnDps,
+          modifiers,
+          undefined,
+          true
+        );
       }
     }
 
@@ -128,12 +183,13 @@ export class PhysicsEngine {
       orb.vy += PHYSICS_CONFIG.GRAVITY * dt;
       this.normalizeOrbSpeed(orb);
 
-      const totalDx = orb.vx * dt;
-      const totalDy = orb.vy * dt;
+      const speedMult = modifiers.overclockActive ? SKILL_CONFIG.OVERCLOCK_SPEED_MULT : 1;
+      const totalDx = orb.vx * speedMult * dt;
+      const totalDy = orb.vy * speedMult * dt;
       const dist = Math.hypot(totalDx, totalDy);
       const maxStep = Math.max(2, orb.radius * 0.35);
       const subSteps = Math.max(1, Math.ceil(dist / maxStep));
-      const subDt = dt / subSteps;
+      const subDt = (dt * speedMult) / subSteps;
 
       for (let s = 0; s < subSteps; s++) {
         if (!orb.alive) break;
@@ -142,7 +198,18 @@ export class PhysicsEngine {
         orb.x += orb.vx * subDt;
         orb.y += orb.vy * subDt;
 
-        this.resolveWallCollisions(orb);
+        const wallBounced = this.resolveWallCollisions(orb, modifiers);
+        if (wallBounced && !this.wallGyroUsed.has(orb)) {
+          const hasGyro = modifiers.bladePassive === 'ricochet_gyro';
+          const hasTwinWall = (modifiers.artifactStacks?.twin_emitter ?? 0) > 0;
+          if (hasGyro || hasTwinWall) {
+            this.wallGyroUsed.add(orb);
+            orb.bouncesLeft = Math.min(orb.maxBounces + 6, orb.bouncesLeft + 1);
+            if (hasGyro) {
+              this.events.onPassiveProc?.('gyro', orb.x, orb.y);
+            }
+          }
+        }
         if (!orb.alive) break;
 
         this.resolveEntityCollisions(
@@ -155,7 +222,8 @@ export class PhysicsEngine {
           oreValueLevel,
           orbSizeLevel,
           prestigeLevel,
-          ascensionTier
+          ascensionTier,
+          modifiers
         );
 
         // Safeguard: clamp back inside shaft bounds if block push-out pressed into wall
@@ -164,7 +232,10 @@ export class PhysicsEngine {
         }
       }
 
-      orb.rotation += (Math.hypot(orb.vx, orb.vy) / Math.max(8, orb.radius)) * dt * 1.4;
+      orb.rotation +=
+        (Math.hypot(orb.vx, orb.vy) / Math.max(8, orb.radius)) *
+        dt *
+        (modifiers.overclockActive ? 2.4 : 1.4);
       this.pushTrailPoint(orb);
 
       if (orb.alive && AntiSoftlock.updateStallWatchdog(orb, dt)) {
@@ -229,7 +300,7 @@ export class PhysicsEngine {
     }
   }
 
-  private resolveWallCollisions(orb: Orb): void {
+  private resolveWallCollisions(orb: Orb, _modifiers: PhysicsModifiers = {}): boolean {
     let hitWall = false;
     if (orb.x - orb.radius < 0) {
       orb.x = orb.radius;
@@ -258,6 +329,7 @@ export class PhysicsEngine {
         this.events.onOrbExpired?.(orb);
       }
     }
+    return hitWall;
   }
 
   private resolveEntityCollisions(
@@ -270,7 +342,8 @@ export class PhysicsEngine {
     oreValueLevel: number,
     orbSizeLevel: number,
     prestigeLevel: number,
-    ascensionTier: number
+    ascensionTier: number,
+    modifiers: PhysicsModifiers
   ): void {
     const queryRadius = orb.radius + Math.hypot(orb.x - stepStartX, orb.y - stepStartY) + 6;
     const candidates = this.grid.queryCircle(orb.x, orb.y, queryRadius);
@@ -279,6 +352,43 @@ export class PhysicsEngine {
       const block = candidates[i];
       if (!block.alive || !orb.alive) continue;
       if (block.kind === 'portal_exit') continue;
+
+      if (
+        block.kind === 'pickup_split' ||
+        block.kind === 'pickup_magnet' ||
+        block.kind === 'pickup_overclock'
+      ) {
+        const cx = block.x + block.width * 0.5;
+        const cy = block.y + block.height * 0.5;
+        const minDist = orb.radius + (block.radius || 18);
+        const dx = orb.x - cx;
+        const dy = orb.y - cy;
+        if (
+          dx * dx + dy * dy < minDist * minDist ||
+          this.segmentCircleHit(stepStartX, stepStartY, orb.x, orb.y, cx, cy, minDist)
+        ) {
+          block.alive = false;
+          if (block.kind === 'pickup_split') {
+            const activeTotal = aliveCount + newClones.length;
+            if (activeTotal < PHYSICS_CONFIG.MAX_ACTIVE_ORBS) {
+              const splitAngle = Math.atan2(Math.abs(orb.vy) + 100, -orb.vx);
+              const clone = this.createOrb(
+                cx,
+                cy,
+                splitAngle,
+                orb.radius * 0.92,
+                Math.max(3, Math.ceil(orb.bouncesLeft * 0.7)),
+                orb.damage * 0.9,
+                true,
+                orb.isOverdrive
+              );
+              newClones.push(clone);
+            }
+          }
+          this.events.onPickupCollected?.(orb, block);
+        }
+        continue;
+      }
 
       if (block.kind === 'bumper' || block.kind === 'portal_entry') {
         const cx = block.x + block.width * 0.5;
@@ -319,12 +429,18 @@ export class PhysicsEngine {
           orb.comboCount++;
           AntiSoftlock.onBlockHit(orb);
 
-          const coins = calcCoinValue(
-            block.depthMeters,
-            'bumper',
-            oreValueLevel,
-            prestigeLevel,
-            ascensionTier
+          const coins = Math.round(
+            calcCoinValue(
+              block.depthMeters,
+              'bumper',
+              oreValueLevel,
+              prestigeLevel,
+              ascensionTier
+            ) *
+              (1 +
+                (modifiers.artifactStacks?.magnetic_wake ?? 0) *
+                  0.2 *
+                  (modifiers.relicPotencyMult ?? 1))
           );
           block.hitFlashTimer = 0.08;
           if (typeof block.hitsRemaining === 'number') {
@@ -335,6 +451,34 @@ export class PhysicsEngine {
           }
           this.events.onBumperHit?.(orb, block, coins);
           continue;
+        }
+        continue;
+      }
+
+      // Falling Boss Shard crystal intercept
+      if (block.kind === 'boss_shard') {
+        const cx = block.x + block.width * 0.5;
+        const cy = block.y + block.height * 0.5;
+        const minDist = orb.radius + (block.radius || 15);
+        const dx = orb.x - cx;
+        const dy = orb.y - cy;
+        if (dx * dx + dy * dy < minDist * minDist) {
+          const nonLethal = block.hp - orb.damage > 0;
+          this.damageBlockDirect(
+            block,
+            orb.damage,
+            entities,
+            oreValueLevel,
+            orbSizeLevel,
+            prestigeLevel,
+            ascensionTier,
+            orb.damage,
+            modifiers,
+            orb
+          );
+          if (nonLethal && block.alive) {
+            this.events.onBossShardHit?.(block);
+          }
         }
         continue;
       }
@@ -385,10 +529,18 @@ export class PhysicsEngine {
         else ny = 1;
       }
 
-      // Cleave check: D >= 2 * HP_rem (never cleave indestructible boss_armor)
+      // Cleave check: D >= ratio * HP_rem (never cleave indestructible boss_armor)
+      let cleaveRatio = PHYSICS_CONFIG.CLEAVE_RATIO;
+      if (modifiers.overclockActive) {
+        cleaveRatio /= SKILL_CONFIG.OVERCLOCK_CLEAVE_BONUS;
+      }
+      if (modifiers.bladePassive === 'precision_cleave') {
+        cleaveRatio *= 0.85;
+      }
+      const effectiveHitDmg = this.computeEffectiveOrbDamage(orb, block, modifiers);
       const canCleave =
         Number.isFinite(block.hp) &&
-        orb.damage >= PHYSICS_CONFIG.CLEAVE_RATIO * block.hp;
+        effectiveHitDmg >= cleaveRatio * block.hp;
 
       if (!canCleave) {
         // Push out cleanly and reflect
@@ -398,12 +550,19 @@ export class PhysicsEngine {
 
         const dot = orb.vx * nx + orb.vy * ny;
         if (dot < 0) {
-          orb.vx = (orb.vx - 2 * dot * nx) * PHYSICS_CONFIG.RESTITUTION_BLOCK;
-          orb.vy = (orb.vy - 2 * dot * ny) * PHYSICS_CONFIG.RESTITUTION_BLOCK;
+          const rest =
+            modifiers.bladePassive === 'ricochet_gyro'
+              ? Math.min(1.01, PHYSICS_CONFIG.RESTITUTION_BLOCK * 1.05)
+              : PHYSICS_CONFIG.RESTITUTION_BLOCK;
+          orb.vx = (orb.vx - 2 * dot * nx) * rest;
+          orb.vy = (orb.vy - 2 * dot * ny) * rest;
           this.normalizeOrbSpeed(orb);
         }
 
         orb.bouncesLeft -= PHYSICS_CONFIG.BLOCK_BOUNCE_COST;
+      } else if (modifiers.bladePassive === 'phase_cleave') {
+        this.normalizeOrbSpeed(orb);
+        this.events.onPassiveProc?.('void', orb.x, orb.y);
       }
 
       orb.comboCount++;
@@ -424,7 +583,8 @@ export class PhysicsEngine {
         orbSizeLevel,
         prestigeLevel,
         ascensionTier,
-        canCleave
+        canCleave,
+        modifiers
       );
 
       if (!canCleave && orb.bouncesLeft <= 0) {
@@ -493,6 +653,56 @@ export class PhysicsEngine {
     this.events.onPortalWarp?.(orb, entry, exit);
   }
 
+  private computeEffectiveOrbDamage(
+    orb: Orb,
+    block: BlockEntity,
+    modifiers: PhysicsModifiers
+  ): number {
+    const potency = modifiers.relicPotencyMult ?? 1;
+    const stacks = modifiers.artifactStacks ?? {};
+    let dmg = orb.damage;
+
+    if (modifiers.overclockActive) {
+      dmg *= SKILL_CONFIG.OVERCLOCK_DAMAGE_MULT;
+    }
+
+    const rampStacks = stacks.kinetic_ramp ?? 0;
+    if (rampStacks > 0) {
+      dmg *= 1 + Math.min(2.0, rampStacks * 0.04 * potency * orb.comboCount);
+    }
+
+    if (
+      modifiers.bladePassive === 'precision_cleave' &&
+      Number.isFinite(block.hp) &&
+      block.hp < block.maxHp
+    ) {
+      dmg *= 1.15;
+    } else if (
+      modifiers.bladePassive === 'shatter_chill' &&
+      (block.kind === 'frost' || block.kind === 'granite' || block.hp < block.maxHp * 0.85)
+    ) {
+      dmg *= 1.25;
+    } else if (modifiers.bladePassive === 'phase_cleave' && block.kind === 'boss_core') {
+      dmg *= 1.35;
+    }
+
+    if (block.kind === 'boss_core') {
+      const breaker = stacks.boss_breaker ?? 0;
+      if (breaker > 0) {
+        dmg *= 1 + 0.35 * breaker * potency;
+      }
+      if (
+        modifiers.activeWeakPointCoreIndex !== null &&
+        modifiers.activeWeakPointCoreIndex !== undefined &&
+        block.bossCoreIndex === modifiers.activeWeakPointCoreIndex
+      ) {
+        dmg *= SKILL_CONFIG.BOSS_WEAKPOINT_CRIT_MULT + breaker * 0.5;
+      }
+    }
+
+    return dmg;
+  }
+
   private applyHitToBlock(
     orb: Orb,
     block: BlockEntity,
@@ -504,9 +714,12 @@ export class PhysicsEngine {
     orbSizeLevel: number,
     prestigeLevel: number,
     ascensionTier: number,
-    cleaved: boolean
+    cleaved: boolean,
+    modifiers: PhysicsModifiers = {}
   ): void {
     block.hitFlashTimer = 0.045;
+    const potency = modifiers.relicPotencyMult ?? 1;
+    const stacks = modifiers.artifactStacks ?? {};
 
     if (block.kind === 'boss_armor') {
       // Transfer 20% splash damage to nearest surviving boss_core in same row (zero-GC loop)
@@ -532,7 +745,9 @@ export class PhysicsEngine {
           orbSizeLevel,
           prestigeLevel,
           ascensionTier,
-          orb.damage
+          orb.damage,
+          modifiers,
+          orb
         );
       }
       this.events.onBlockHit?.(orb, block, 0, false);
@@ -551,30 +766,72 @@ export class PhysicsEngine {
       }
     }
 
-    // Splitter prism spawns 1 clone orb with 50% remaining bounces
+    // Splitter prism spawns 1+ clone orbs
     if (block.kind === 'splitter') {
-      const activeTotal = aliveCount + newClones.length;
-      if (activeTotal < PHYSICS_CONFIG.MAX_ACTIVE_ORBS && orb.bouncesLeft >= 2) {
-        const cloneAngle = Math.atan2(orb.vy, -orb.vx);
-        const clone = this.createOrb(
-          orb.x,
-          orb.y,
-          cloneAngle,
-          orb.radius * 0.9,
-          Math.max(2, Math.floor(orb.bouncesLeft * 0.5)),
-          orb.damage * 0.85,
-          true,
-          orb.isOverdrive
-        );
-        newClones.push(clone);
+      const forkBonus = stacks.chain_fork ?? 0;
+      const twinExtra = (stacks.twin_emitter ?? 0) > 0 ? 1 : 0;
+      const count = 1 + (forkBonus > 0 || twinExtra > 0 ? 1 : 0);
+      for (let c = 0; c < count; c++) {
+        const activeTotal = aliveCount + newClones.length;
+        if (activeTotal < PHYSICS_CONFIG.MAX_ACTIVE_ORBS && orb.bouncesLeft >= 2) {
+          const cloneAngle = Math.atan2(orb.vy, -orb.vx) + (c === 1 ? 0.28 : 0);
+          const clone = this.createOrb(
+            orb.x,
+            orb.y,
+            cloneAngle,
+            orb.radius * 0.9,
+            Math.max(2, Math.floor(orb.bouncesLeft * 0.5)),
+            orb.damage * 0.85,
+            true,
+            orb.isOverdrive
+          );
+          newClones.push(clone);
+        }
       }
     }
 
-    this.events.onBlockHit?.(orb, block, orb.damage, cleaved);
-    // Tougher armored Granite at Biome 2+ (0.38x un-cleaved direct dmg; 0.5x in Biome 1)
-    const graniteMult = block.biomeIndex >= 1 ? 0.38 : 0.5;
+    // Thermite Edge Burn DoT
+    if (modifiers.bladePassive === 'thermite_edge' && Number.isFinite(block.hp)) {
+      block.burnTimer = 3.0;
+      block.burnDps = Math.max(block.burnDps ?? 0, orb.damage * 0.22);
+      this.events.onPassiveProc?.('burn', block.x + block.width * 0.5, block.y + block.height * 0.5);
+    }
+
+    // Effective hit damage + Weak-Point + Crit + Armor Pierce
+    let hitDmg = this.computeEffectiveOrbDamage(orb, block, modifiers);
+    const lensStacks = stacks.precision_lens ?? 0;
+    const critChance = lensStacks > 0 ? Math.min(0.65, lensStacks * 0.2 * potency) : 0;
+    const isWeakPoint =
+      block.kind === 'boss_core' &&
+      modifiers.activeWeakPointCoreIndex !== null &&
+      modifiers.activeWeakPointCoreIndex !== undefined &&
+      block.bossCoreIndex === modifiers.activeWeakPointCoreIndex;
+    let critFired = false;
+    if (isWeakPoint) {
+      if (critChance > 0 && Math.random() < critChance) {
+        hitDmg *= 1.75;
+      }
+      this.events.onBossWeakPointHit?.(block, hitDmg);
+      critFired = true;
+    } else if (critChance > 0 && Math.random() < critChance) {
+      hitDmg *= 1.75;
+      this.events.onBlockCrit?.(block, hitDmg);
+      critFired = true;
+    }
+
+    const baseGraniteMult = block.biomeIndex >= 1 ? 0.38 : 0.5;
+    const graniteMult = modifiers.overclockActive
+      ? Math.max(baseGraniteMult, 0.72)
+      : modifiers.bladePassive === 'corrosive_splash'
+      ? Math.max(baseGraniteMult, 0.65)
+      : baseGraniteMult;
+
     const directDmg =
-      block.kind === 'granite' && !cleaved ? orb.damage * graniteMult : orb.damage;
+      block.kind === 'granite' && !cleaved ? hitDmg * graniteMult : hitDmg;
+    const willKill = Number.isFinite(block.hp) && block.hp - directDmg <= 0;
+
+    this.events.onBlockHit?.(orb, block, hitDmg, cleaved, { willKill, critFired });
+
     this.damageBlockDirect(
       block,
       directDmg,
@@ -583,8 +840,74 @@ export class PhysicsEngine {
       orbSizeLevel,
       prestigeLevel,
       ascensionTier,
-      orb.damage
+      orb.damage,
+      modifiers,
+      orb
     );
+
+    // Arc Discharge (Tesla Rotor passive or Chain Fork on every 5th bounce)
+    if (
+      modifiers.bladePassive === 'arc_discharge' &&
+      orb.comboCount > 0 &&
+      orb.comboCount % 5 === 0
+    ) {
+      this.triggerChainLightning(
+        block,
+        orb.damage * 0.55,
+        2 + (stacks.chain_fork ?? 0),
+        entities,
+        oreValueLevel,
+        orbSizeLevel,
+        prestigeLevel,
+        ascensionTier,
+        orb.damage,
+        modifiers,
+        orb
+      );
+    }
+  }
+
+  private triggerChainLightning(
+    source: BlockEntity,
+    dmg: number,
+    maxTargets: number,
+    entities: BlockEntity[],
+    oreValueLevel: number,
+    orbSizeLevel: number,
+    prestigeLevel: number,
+    ascensionTier: number,
+    baseOrbDamage: number,
+    modifiers: PhysicsModifiers,
+    sourceOrb?: Orb
+  ): void {
+    const sx = source.x + source.width * 0.5;
+    const sy = source.y + source.height * 0.5;
+    const nearby: Array<{ block: BlockEntity; dist: number }> = [];
+    for (let i = 0; i < entities.length; i++) {
+      const e = entities[i];
+      if (!e.alive || e.id === source.id || !Number.isFinite(e.hp)) continue;
+      const d = Math.hypot(e.x + e.width * 0.5 - sx, e.y + e.height * 0.5 - sy);
+      if (d <= 165) nearby.push({ block: e, dist: d });
+    }
+    nearby.sort((a, b) => a.dist - b.dist);
+    const limit = Math.min(maxTargets, nearby.length);
+    for (let i = 0; i < limit; i++) {
+      const t = nearby[i].block;
+      this.events.onLightningArc?.(sx, sy, t.x + t.width * 0.5, t.y + t.height * 0.5, t);
+      this.damageBlockDirect(
+        t,
+        dmg,
+        entities,
+        oreValueLevel,
+        orbSizeLevel,
+        prestigeLevel,
+        ascensionTier,
+        baseOrbDamage,
+        modifiers,
+        sourceOrb,
+        true
+      );
+    }
   }
 
   private damageBlockDirect(
@@ -595,7 +918,10 @@ export class PhysicsEngine {
     orbSizeLevel: number,
     prestigeLevel: number,
     ascensionTier: number,
-    baseOrbDamage: number
+    baseOrbDamage: number,
+    modifiers: PhysicsModifiers = {},
+    sourceOrb?: Orb,
+    suppressSideEffects: boolean = false
   ): void {
     if (!block.alive || !Number.isFinite(block.hp)) return;
     block.hp -= dmg;
@@ -615,23 +941,114 @@ export class PhysicsEngine {
     block.hp = 0;
     block.alive = false;
 
-    const coins = calcCoinValue(
+    const potency = modifiers.relicPotencyMult ?? 1;
+    const stacks = modifiers.artifactStacks ?? {};
+    let coins = calcCoinValue(
       block.depthMeters,
       block.kind,
       oreValueLevel,
       prestigeLevel,
       ascensionTier
     );
+    if (
+      (modifiers.bladePassive === 'prospectors_teeth' ||
+        modifiers.bladePassive === 'midas_magnetism') &&
+      (block.kind === 'ore' || block.kind === 'vault')
+    ) {
+      const mult = modifiers.bladePassive === 'prospectors_teeth' ? 1.2 : 1.15;
+      coins = Math.round(coins * mult);
+    }
+    const wakeStacks = stacks.magnetic_wake ?? 0;
+    if (wakeStacks > 0) {
+      coins = Math.round(coins * (1 + 0.2 * wakeStacks * potency));
+    }
+
     const isTnt = block.kind === 'tnt';
     const isVault = block.kind === 'vault';
     this.events.onBlockDestroyed?.(block, coins, isTnt, isVault);
 
+    if (sourceOrb && (stacks.vampiric_bounces ?? 0) > 0) {
+      const prevBreaks = this.orbBreakCounts.get(sourceOrb) ?? 0;
+      const nextBreaks = prevBreaks + 1;
+      this.orbBreakCounts.set(sourceOrb, nextBreaks);
+      const threshold = Math.max(2, 7 - (stacks.vampiric_bounces ?? 1));
+      if (nextBreaks % threshold === 0) {
+        sourceOrb.bouncesLeft = Math.min(sourceOrb.maxBounces + 6, sourceOrb.bouncesLeft + 1);
+      }
+    }
+
+    if (!suppressSideEffects && (modifiers.bladePassive === 'corrosive_splash' || modifiers.bladePassive === 'shatter_chill')) {
+      const cx = block.x + block.width * 0.5;
+      const cy = block.y + block.height * 0.5;
+      const splashRatio = modifiers.bladePassive === 'corrosive_splash' ? 0.25 : 0.2;
+      let splashed = false;
+      for (let i = 0; i < entities.length; i++) {
+        const other = entities[i];
+        if (!other.alive || other.id === block.id || !Number.isFinite(other.hp)) continue;
+        const d = Math.hypot(other.x + other.width * 0.5 - cx, other.y + other.height * 0.5 - cy);
+        if (d <= 82) {
+          splashed = true;
+          this.damageBlockDirect(
+            other,
+            baseOrbDamage * splashRatio,
+            entities,
+            oreValueLevel,
+            orbSizeLevel,
+            prestigeLevel,
+            ascensionTier,
+            baseOrbDamage,
+            modifiers,
+            sourceOrb,
+            true
+          );
+          if (modifiers.bladePassive === 'shatter_chill') break;
+        }
+      }
+      if (splashed) {
+        this.events.onPassiveProc?.(
+          modifiers.bladePassive === 'corrosive_splash' ? 'acid' : 'chill',
+          cx,
+          cy
+        );
+      }
+    }
+
+    if (!suppressSideEffects && block.kind === 'ore' && (stacks.volatile_gold ?? 0) > 0) {
+      const cx = block.x + block.width * 0.5;
+      const cy = block.y + block.height * 0.5;
+      const blastDmg = baseOrbDamage * 0.75 * (stacks.volatile_gold ?? 1) * potency;
+      this.events.onTntExplode?.(cx, cy, 85);
+      for (let i = 0; i < entities.length; i++) {
+        const other = entities[i];
+        if (!other.alive || other.id === block.id || !Number.isFinite(other.hp)) continue;
+        const d = Math.hypot(other.x + other.width * 0.5 - cx, other.y + other.height * 0.5 - cy);
+        if (d <= 92) {
+          this.damageBlockDirect(
+            other,
+            blastDmg,
+            entities,
+            oreValueLevel,
+            orbSizeLevel,
+            prestigeLevel,
+            ascensionTier,
+            baseOrbDamage,
+            modifiers,
+            sourceOrb,
+            true
+          );
+        }
+      }
+    }
+
+    const prismStacks = stacks.prism_multiply ?? 0;
+    const prismMult = 1 + 0.25 * prismStacks * potency;
+
     if (isTnt) {
       const cx = block.x + block.width * 0.5;
       const cy = block.y + block.height * 0.5;
-      const radius = calcTntRadiusPx(orbSizeLevel);
+      const radius = calcTntRadiusPx(orbSizeLevel) * (1 + 0.2 * prismStacks * potency);
       this.events.onTntExplode?.(cx, cy, radius);
-      const tntDmg = baseOrbDamage * TNT_DAMAGE_MULT;
+      const tntDmg = baseOrbDamage * TNT_DAMAGE_MULT * prismMult;
 
       for (let i = 0; i < entities.length; i++) {
         const other = entities[i];
@@ -648,14 +1065,16 @@ export class PhysicsEngine {
             orbSizeLevel,
             prestigeLevel,
             ascensionTier,
-            baseOrbDamage
+            baseOrbDamage,
+            modifiers,
+            sourceOrb
           );
         }
       }
     } else if (block.kind === 'laser') {
       const rowY = block.y + block.height * 0.5;
       this.events.onLaserFire?.(rowY, block.biomeIndex);
-      const laserDmg = baseOrbDamage * LASER_DAMAGE_MULT;
+      const laserDmg = baseOrbDamage * LASER_DAMAGE_MULT * prismMult;
       for (let i = 0; i < entities.length; i++) {
         const other = entities[i];
         if (!other.alive || other.id === block.id || other.row !== block.row) continue;
@@ -668,7 +1087,9 @@ export class PhysicsEngine {
             orbSizeLevel,
             prestigeLevel,
             ascensionTier,
-            baseOrbDamage
+            baseOrbDamage,
+            modifiers,
+            sourceOrb
           );
         }
       }
@@ -690,6 +1111,208 @@ export class PhysicsEngine {
         }
         this.events.onBossGateBroken?.(block.biomeIndex, block.row);
       }
+    }
+  }
+
+  /**
+   * Active Skill: Mag-Pulse Slam — pulls coins, steers orbs toward highest-value nearby target,
+   * salvages falling Boss Shards, and blasts a localized kinetic shockwave.
+   */
+  triggerMagPulseSlam(
+    orbs: Orb[],
+    entities: BlockEntity[],
+    coins: CoinDrop[],
+    oreValueLevel: number,
+    orbSizeLevel: number,
+    prestigeLevel: number,
+    ascensionTier: number,
+    modifiers: PhysicsModifiers = {}
+  ): Array<{ x: number; y: number; radius: number }> {
+    const pulses: Array<{ x: number; y: number; radius: number }> = [];
+    for (let i = 0; i < coins.length; i++) {
+      if (coins[i].alive) coins[i].magnetized = true;
+    }
+
+    // Salvage all falling Boss Shards immediately
+    for (let i = 0; i < entities.length; i++) {
+      const e = entities[i];
+      if (e.alive && e.kind === 'boss_shard') {
+        this.events.onBossShardSalvaged?.(e);
+        this.damageBlockDirect(
+          e,
+          e.hp + 10,
+          entities,
+          oreValueLevel,
+          orbSizeLevel,
+          prestigeLevel,
+          ascensionTier,
+          10,
+          modifiers,
+          undefined,
+          true
+        );
+      }
+    }
+
+    for (let i = 0; i < orbs.length; i++) {
+      const orb = orbs[i];
+      if (!orb.alive) continue;
+      pulses.push({ x: orb.x, y: orb.y, radius: SKILL_CONFIG.MAG_PULSE_RADIUS_PX });
+
+      // Steer orb toward nearest high-value target (boss_core > vault > tnt > ore > strata)
+      let bestTarget: BlockEntity | null = null;
+      let bestScore = -1;
+      for (let j = 0; j < entities.length; j++) {
+        const b = entities[j];
+        if (!b.alive || !Number.isFinite(b.hp) || b.kind === 'boss_armor') continue;
+        const bx = b.x + b.width * 0.5;
+        const by = b.y + b.height * 0.5;
+        const d = Math.hypot(bx - orb.x, by - orb.y);
+        if (d > 300 || d < 4) continue;
+        const priority =
+          b.kind === 'boss_core'
+            ? 4.0
+            : b.kind === 'tnt'
+            ? 3.2
+            : b.kind === 'vault'
+            ? 3.0
+            : b.kind === 'ore'
+            ? 2.0
+            : 1.0;
+        const score = priority * (1 / (40 + d));
+        if (score > bestScore) {
+          bestScore = score;
+          bestTarget = b;
+        }
+        if (d <= SKILL_CONFIG.MAG_PULSE_RADIUS_PX) {
+          this.damageBlockDirect(
+            b,
+            orb.damage * 0.45,
+            entities,
+            oreValueLevel,
+            orbSizeLevel,
+            prestigeLevel,
+            ascensionTier,
+            orb.damage,
+            modifiers,
+            orb,
+            true
+          );
+        }
+      }
+
+      const speed = Math.min(PHYSICS_CONFIG.MAX_ORB_SPEED, Math.max(PHYSICS_CONFIG.MIN_ORB_SPEED, Math.hypot(orb.vx, orb.vy) * 1.12));
+      if (bestTarget) {
+        const tx = bestTarget.x + bestTarget.width * 0.5 - orb.x;
+        const ty = bestTarget.y + bestTarget.height * 0.5 - orb.y;
+        const len = Math.max(1, Math.hypot(tx, ty));
+        orb.vx = (tx / len) * speed;
+        orb.vy = (ty / len) * speed;
+      } else {
+        orb.vy = Math.abs(orb.vy) + 180;
+        this.normalizeOrbSpeed(orb);
+      }
+      AntiSoftlock.onBlockHit(orb);
+    }
+
+    return pulses;
+  }
+
+  /**
+   * Updates Companion Auto-Drill Drone position, coin magnet, and autonomous laser drill fire.
+   */
+  stepCompanionDrone(
+    dt: number,
+    drone: CompanionDroneState,
+    entities: BlockEntity[],
+    coins: CoinDrop[],
+    cameraY: number,
+    droneStats: { unlocked: boolean; fireIntervalS: number; beamDamage: number; magnetRadiusPx: number },
+    oreValueLevel: number,
+    orbSizeLevel: number,
+    prestigeLevel: number,
+    ascensionTier: number,
+    modifiers: PhysicsModifiers = {}
+  ): void {
+    if (!droneStats.unlocked) {
+      drone.active = false;
+      return;
+    }
+    drone.active = true;
+    drone.bobPhase += dt * 4.2;
+    drone.propRotation += dt * 18;
+    drone.beamTimer = Math.max(0, drone.beamTimer - dt);
+    drone.fireCooldown = Math.max(0, drone.fireCooldown - dt);
+
+    const desiredX = PHYSICS_CONFIG.SHAFT_WIDTH * 0.5 + Math.sin(drone.bobPhase * 0.42) * 155;
+    const desiredY = cameraY + 115;
+    drone.x += (desiredX - drone.x) * Math.min(1, dt * 4);
+    drone.y += (desiredY - drone.y) * Math.min(1, dt * 4);
+
+    // Passive Drone Coin Vacuum
+    const rSq = droneStats.magnetRadiusPx * droneStats.magnetRadiusPx;
+    for (let i = 0; i < coins.length; i++) {
+      const c = coins[i];
+      if (!c.alive || c.magnetized) continue;
+      const dx = c.x - drone.x;
+      const dy = c.y - drone.y;
+      if (dx * dx + dy * dy <= rSq) {
+        c.magnetized = true;
+      }
+    }
+
+    if (drone.fireCooldown > 0) return;
+
+    let bestTarget: BlockEntity | null = null;
+    let bestScore = -1;
+    for (let i = 0; i < entities.length; i++) {
+      const b = entities[i];
+      if (!b.alive || !Number.isFinite(b.hp) || b.kind === 'boss_armor') continue;
+      if (b.kind === 'pickup_split' || b.kind === 'pickup_magnet' || b.kind === 'pickup_overclock') continue;
+      if (b.y < cameraY + 30 || b.y > cameraY + 650) continue;
+      const isWeak =
+        b.kind === 'boss_core' &&
+        modifiers.activeWeakPointCoreIndex !== null &&
+        b.bossCoreIndex === modifiers.activeWeakPointCoreIndex;
+      const priority =
+        isWeak
+          ? 6
+          : b.kind === 'boss_core'
+          ? 4.2
+          : b.kind === 'tnt'
+          ? 3.2
+          : b.kind === 'vault'
+          ? 3.0
+          : b.kind === 'ore'
+          ? 2.0
+          : 1.0;
+      const d = Math.hypot(b.x + b.width * 0.5 - drone.x, b.y + b.height * 0.5 - drone.y);
+      const score = priority / (60 + d);
+      if (score > bestScore) {
+        bestScore = score;
+        bestTarget = b;
+      }
+    }
+
+    if (bestTarget) {
+      drone.targetX = bestTarget.x + bestTarget.width * 0.5;
+      drone.targetY = bestTarget.y + bestTarget.height * 0.5;
+      drone.beamTimer = 0.16;
+      drone.fireCooldown = droneStats.fireIntervalS;
+      this.events.onDroneShot?.(drone.x, drone.y, drone.targetX, drone.targetY);
+      this.damageBlockDirect(
+        bestTarget,
+        droneStats.beamDamage,
+        entities,
+        oreValueLevel,
+        orbSizeLevel,
+        prestigeLevel,
+        ascensionTier,
+        droneStats.beamDamage,
+        modifiers,
+        undefined,
+        true
+      );
     }
   }
 
@@ -794,7 +1417,16 @@ export class PhysicsEngine {
 
         for (let j = 0; j < entities.length; j++) {
           const b = entities[j];
-          if (!b.alive || b.kind === 'portal_exit') continue;
+          if (
+            !b.alive ||
+            b.kind === 'portal_exit' ||
+            b.kind === 'pickup_split' ||
+            b.kind === 'pickup_magnet' ||
+            b.kind === 'pickup_overclock' ||
+            b.kind === 'boss_shard'
+          ) {
+            continue;
+          }
 
           if (b.kind === 'bumper' || b.kind === 'portal_entry') {
             const bx = b.x + b.width * 0.5;

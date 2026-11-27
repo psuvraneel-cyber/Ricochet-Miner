@@ -12,7 +12,10 @@ export type UpgradeId =
   | 'multiorb'
   | 'orbsize'
   | 'luck'
-  | 'orevalue';
+  | 'orevalue'
+  | 'dronebay'
+  | 'relicforge'
+  | 'overclockcore';
 
 export type EntityKind =
   | 'strata'
@@ -27,7 +30,34 @@ export type EntityKind =
   | 'boss_armor'
   | 'frost'
   | 'portal_entry'
-  | 'portal_exit';
+  | 'portal_exit'
+  | 'pickup_split'
+  | 'pickup_magnet'
+  | 'pickup_overclock'
+  | 'boss_shard';
+
+export type BladePassiveId =
+  | 'precision_cleave'
+  | 'prospectors_teeth'
+  | 'ricochet_gyro'
+  | 'thermite_edge'
+  | 'shatter_chill'
+  | 'midas_magnetism'
+  | 'arc_discharge'
+  | 'corrosive_splash'
+  | 'phase_cleave';
+
+export type ArtifactId =
+  | 'chain_fork'
+  | 'volatile_gold'
+  | 'twin_emitter'
+  | 'kinetic_ramp'
+  | 'vampiric_bounces'
+  | 'prism_multiply'
+  | 'boss_breaker'
+  | 'magnetic_wake'
+  | 'overclock_surge'
+  | 'precision_lens';
 
 export interface BiomeSpec {
   id: BiomeId;
@@ -62,6 +92,9 @@ export interface SkinSpec {
   nameKey: string;
   category: 'default' | 'milestone' | 'mastery' | 'coin_or_ad';
   unlockDescKey: string;
+  passiveId: BladePassiveId;
+  passiveTitleKey: string;
+  passiveDescKey: string;
   primaryColor: string;
   secondaryColor: string;
   trailColor: string;
@@ -71,6 +104,15 @@ export interface SkinSpec {
   masteryStat?: 'tntDetonated' | 'maxBounceCombo' | 'vaultsBroken' | 'blocksDestroyed';
   masteryTarget?: number;
   rvCost?: number;
+}
+
+export interface ArtifactSpec {
+  id: ArtifactId;
+  nameKey: string;
+  descKey: string;
+  icon: 'lightning' | 'blast' | 'orb' | 'pickaxe' | 'clover' | 'gem' | 'bossCore' | 'coin' | 'fastForward';
+  accentColor: string;
+  maxStacks: number;
 }
 
 export const PHYSICS_CONFIG = {
@@ -124,12 +166,34 @@ export const ENTITY_STATS: Record<
   splitter: { hpMult: 0.5, coinMult: 1.0 },
   laser: { hpMult: 1.1, coinMult: 1.5 },
   vault: { hpMult: 5.5, coinMult: 10.0 },
-  boss_core: { hpMult: 18.0, coinMult: 20.0 },
+  boss_core: { hpMult: 30.0, coinMult: 20.0 },
   boss_armor: { hpMult: Number.POSITIVE_INFINITY, coinMult: 0.2 },
   frost: { hpMult: 1.4, coinMult: 1.4 },
   portal_entry: { hpMult: Number.POSITIVE_INFINITY, coinMult: 0 },
   portal_exit: { hpMult: Number.POSITIVE_INFINITY, coinMult: 0 },
+  pickup_split: { hpMult: 0, coinMult: 0 },
+  pickup_magnet: { hpMult: 0, coinMult: 0 },
+  pickup_overclock: { hpMult: 0, coinMult: 0 },
+  boss_shard: { hpMult: 0.35, coinMult: 1.5 },
 };
+
+export const SKILL_CONFIG = {
+  MAG_PULSE_BASE_COOLDOWN_S: 4.0,
+  MAG_PULSE_MIN_COOLDOWN_S: 2.1,
+  MAG_PULSE_COOLDOWN_REDUCTION_PER_LV: 0.12,
+  MAG_PULSE_RADIUS_PX: 175,
+  OVERCLOCK_BASE_DURATION_S: 3.5,
+  OVERCLOCK_DURATION_PER_LV: 0.25,
+  OVERCLOCK_DAMAGE_MULT: 1.55,
+  OVERCLOCK_SPEED_MULT: 1.25,
+  OVERCLOCK_CLEAVE_BONUS: 1.35,
+  OVERCLOCK_BREAKS_PER_RECHARGE: 20,
+  BOSS_WEAKPOINT_CYCLE_S: 4.5,
+  BOSS_WEAKPOINT_CRIT_MULT: 2.0,
+  BOSS_PHASE2_HP_RATIO: 0.5,
+  BOSS_SHARD_INTERVAL_S: 3.0,
+  DRONE_FREE_UNLOCK_DEPTH_M: 100,
+} as const;
 
 export const TNT_BASE_RADIUS_TILES = 2.5;
 export const TNT_DAMAGE_MULT = 3.5;
@@ -239,7 +303,7 @@ export const BIOMES: readonly BiomeSpec[] = [
     nameKey: 'biome_crystal',
     startDepthM: 150,
     endDepthM: 350,
-    coinMultiplier: 2.7,
+    coinMultiplier: 1.8,
     palette: {
       bgTop: '#13112c',
       bgBottom: '#1e1642',
@@ -256,7 +320,7 @@ export const BIOMES: readonly BiomeSpec[] = [
     nameKey: 'biome_magma',
     startDepthM: 350,
     endDepthM: 600,
-    coinMultiplier: 7.2,
+    coinMultiplier: 3.1,
     palette: {
       bgTop: '#181214',
       bgBottom: '#2b130e',
@@ -273,7 +337,7 @@ export const BIOMES: readonly BiomeSpec[] = [
     nameKey: 'biome_subzero',
     startDepthM: 600,
     endDepthM: 900,
-    coinMultiplier: 20,
+    coinMultiplier: 5.4,
     palette: {
       bgTop: '#0b192c',
       bgBottom: '#102a43',
@@ -290,7 +354,7 @@ export const BIOMES: readonly BiomeSpec[] = [
     nameKey: 'biome_cyber',
     startDepthM: 900,
     endDepthM: 1300,
-    coinMultiplier: 48,
+    coinMultiplier: 9.2,
     palette: {
       bgTop: '#120a21',
       bgBottom: '#1b0f30',
@@ -307,7 +371,7 @@ export const BIOMES: readonly BiomeSpec[] = [
     nameKey: 'biome_quantum',
     startDepthM: 1300,
     endDepthM: Number.POSITIVE_INFINITY,
-    coinMultiplier: 100,
+    coinMultiplier: 15.5,
     palette: {
       bgTop: '#05070e',
       bgBottom: '#111827',
@@ -326,8 +390,8 @@ export const UPGRADES: readonly UpgradeSpec[] = [
     nameKey: 'upg_damage',
     descKey: 'upg_damage_desc',
     baseCost: 25,
-    growthRate: 1.54,
-    maxLevel: 38,
+    growthRate: 1.32,
+    maxLevel: 64,
     icon: 'pickaxe',
   },
   {
@@ -335,8 +399,8 @@ export const UPGRADES: readonly UpgradeSpec[] = [
     nameKey: 'upg_bounces',
     descKey: 'upg_bounces_desc',
     baseCost: 35,
-    growthRate: 1.52,
-    maxLevel: 28,
+    growthRate: 1.31,
+    maxLevel: 54,
     icon: 'lightning',
   },
   {
@@ -344,8 +408,8 @@ export const UPGRADES: readonly UpgradeSpec[] = [
     nameKey: 'upg_multiorb',
     descKey: 'upg_multiorb_desc',
     baseCost: 480,
-    growthRate: 2.08,
-    maxLevel: 8,
+    growthRate: 1.56,
+    maxLevel: 16,
     icon: 'orb',
   },
   {
@@ -353,8 +417,8 @@ export const UPGRADES: readonly UpgradeSpec[] = [
     nameKey: 'upg_orbsize',
     descKey: 'upg_orbsize_desc',
     baseCost: 55,
-    growthRate: 1.54,
-    maxLevel: 20,
+    growthRate: 1.31,
+    maxLevel: 44,
     icon: 'blast',
   },
   {
@@ -362,8 +426,8 @@ export const UPGRADES: readonly UpgradeSpec[] = [
     nameKey: 'upg_luck',
     descKey: 'upg_luck_desc',
     baseCost: 65,
-    growthRate: 1.52,
-    maxLevel: 20,
+    growthRate: 1.31,
+    maxLevel: 44,
     icon: 'clover',
   },
   {
@@ -371,9 +435,119 @@ export const UPGRADES: readonly UpgradeSpec[] = [
     nameKey: 'upg_orevalue',
     descKey: 'upg_orevalue_desc',
     baseCost: 45,
-    growthRate: 1.55,
-    maxLevel: 34,
+    growthRate: 1.32,
+    maxLevel: 58,
     icon: 'coin',
+  },
+  {
+    id: 'dronebay',
+    nameKey: 'upg_dronebay',
+    descKey: 'upg_dronebay_desc',
+    baseCost: 240,
+    growthRate: 1.29,
+    maxLevel: 46,
+    icon: 'drone',
+  },
+  {
+    id: 'relicforge',
+    nameKey: 'upg_relicforge',
+    descKey: 'upg_relicforge_desc',
+    baseCost: 340,
+    growthRate: 1.3,
+    maxLevel: 44,
+    icon: 'gem',
+  },
+  {
+    id: 'overclockcore',
+    nameKey: 'upg_overclockcore',
+    descKey: 'upg_overclockcore_desc',
+    baseCost: 220,
+    growthRate: 1.29,
+    maxLevel: 46,
+    icon: 'lightning',
+  },
+];
+
+export const ARTIFACTS: readonly ArtifactSpec[] = [
+  {
+    id: 'chain_fork',
+    nameKey: 'perk_chain_fork',
+    descKey: 'perk_chain_fork_desc',
+    icon: 'lightning',
+    accentColor: '#38bdf8',
+    maxStacks: 4,
+  },
+  {
+    id: 'volatile_gold',
+    nameKey: 'perk_volatile_gold',
+    descKey: 'perk_volatile_gold_desc',
+    icon: 'blast',
+    accentColor: '#fbbf24',
+    maxStacks: 4,
+  },
+  {
+    id: 'twin_emitter',
+    nameKey: 'perk_twin_emitter',
+    descKey: 'perk_twin_emitter_desc',
+    icon: 'orb',
+    accentColor: '#c084fc',
+    maxStacks: 4,
+  },
+  {
+    id: 'kinetic_ramp',
+    nameKey: 'perk_kinetic_ramp',
+    descKey: 'perk_kinetic_ramp_desc',
+    icon: 'fastForward',
+    accentColor: '#fb923c',
+    maxStacks: 5,
+  },
+  {
+    id: 'vampiric_bounces',
+    nameKey: 'perk_vampiric_bounces',
+    descKey: 'perk_vampiric_bounces_desc',
+    icon: 'clover',
+    accentColor: '#4ade80',
+    maxStacks: 4,
+  },
+  {
+    id: 'prism_multiply',
+    nameKey: 'perk_prism_multiply',
+    descKey: 'perk_prism_multiply_desc',
+    icon: 'gem',
+    accentColor: '#e879f9',
+    maxStacks: 4,
+  },
+  {
+    id: 'boss_breaker',
+    nameKey: 'perk_boss_breaker',
+    descKey: 'perk_boss_breaker_desc',
+    icon: 'bossCore',
+    accentColor: '#f43f5e',
+    maxStacks: 4,
+  },
+  {
+    id: 'magnetic_wake',
+    nameKey: 'perk_magnetic_wake',
+    descKey: 'perk_magnetic_wake_desc',
+    icon: 'coin',
+    accentColor: '#facc15',
+    maxStacks: 4,
+  },
+  {
+    id: 'overclock_surge',
+    nameKey: 'perk_overclock_surge',
+    descKey: 'perk_overclock_surge_desc',
+    icon: 'fastForward',
+    accentColor: '#22d3ee',
+    maxStacks: 4,
+  },
+  {
+    id: 'precision_lens',
+    nameKey: 'perk_precision_lens',
+    descKey: 'perk_precision_lens_desc',
+    icon: 'pickaxe',
+    accentColor: '#f8fafc',
+    maxStacks: 4,
   },
 ];
 
@@ -383,6 +557,9 @@ export const SKINS: readonly SkinSpec[] = [
     nameKey: 'skin_steel_sawblade',
     category: 'default',
     unlockDescKey: 'skin_unlock_default',
+    passiveId: 'precision_cleave',
+    passiveTitleKey: 'passive_precision_cleave',
+    passiveDescKey: 'passive_precision_cleave_desc',
     primaryColor: '#e2e8f0',
     secondaryColor: '#d97706',
     trailColor: '#ffb732',
@@ -393,6 +570,9 @@ export const SKINS: readonly SkinSpec[] = [
     nameKey: 'skin_copper_gear',
     category: 'coin_or_ad',
     unlockDescKey: 'skin_unlock_copper',
+    passiveId: 'prospectors_teeth',
+    passiveTitleKey: 'passive_prospectors_teeth',
+    passiveDescKey: 'passive_prospectors_teeth_desc',
     primaryColor: '#d97706',
     secondaryColor: '#78350f',
     trailColor: '#f59e0b',
@@ -404,6 +584,9 @@ export const SKINS: readonly SkinSpec[] = [
     nameKey: 'skin_emerald_buzzsaw',
     category: 'milestone',
     unlockDescKey: 'skin_unlock_biome_1',
+    passiveId: 'ricochet_gyro',
+    passiveTitleKey: 'passive_ricochet_gyro',
+    passiveDescKey: 'passive_ricochet_gyro_desc',
     primaryColor: '#34d399',
     secondaryColor: '#065f46',
     trailColor: '#10b981',
@@ -416,6 +599,9 @@ export const SKINS: readonly SkinSpec[] = [
     nameKey: 'skin_magma_cutter',
     category: 'milestone',
     unlockDescKey: 'skin_unlock_biome_2',
+    passiveId: 'thermite_edge',
+    passiveTitleKey: 'passive_thermite_edge',
+    passiveDescKey: 'passive_thermite_edge_desc',
     primaryColor: '#fb7185',
     secondaryColor: '#991b1b',
     trailColor: '#f97316',
@@ -428,6 +614,9 @@ export const SKINS: readonly SkinSpec[] = [
     nameKey: 'skin_frost_star',
     category: 'milestone',
     unlockDescKey: 'skin_unlock_biome_3',
+    passiveId: 'shatter_chill',
+    passiveTitleKey: 'passive_shatter_chill',
+    passiveDescKey: 'passive_shatter_chill_desc',
     primaryColor: '#7dd3fc',
     secondaryColor: '#0369a1',
     trailColor: '#38bdf8',
@@ -440,6 +629,9 @@ export const SKINS: readonly SkinSpec[] = [
     nameKey: 'skin_gold_chakram',
     category: 'coin_or_ad',
     unlockDescKey: 'skin_unlock_day7',
+    passiveId: 'midas_magnetism',
+    passiveTitleKey: 'passive_midas_magnetism',
+    passiveDescKey: 'passive_midas_magnetism_desc',
     primaryColor: '#fde047',
     secondaryColor: '#dc2626',
     trailColor: '#fbbf24',
@@ -451,6 +643,9 @@ export const SKINS: readonly SkinSpec[] = [
     nameKey: 'skin_tesla_rotor',
     category: 'mastery',
     unlockDescKey: 'skin_unlock_combo',
+    passiveId: 'arc_discharge',
+    passiveTitleKey: 'passive_arc_discharge',
+    passiveDescKey: 'passive_arc_discharge_desc',
     primaryColor: '#2dd4bf',
     secondaryColor: '#1e293b',
     trailColor: '#22d3ee',
@@ -464,6 +659,9 @@ export const SKINS: readonly SkinSpec[] = [
     nameKey: 'skin_toxic_drill',
     category: 'coin_or_ad',
     unlockDescKey: 'skin_unlock_toxic',
+    passiveId: 'corrosive_splash',
+    passiveTitleKey: 'passive_corrosive_splash',
+    passiveDescKey: 'passive_corrosive_splash_desc',
     primaryColor: '#a3e635',
     secondaryColor: '#3f6212',
     trailColor: '#bef264',
@@ -476,6 +674,9 @@ export const SKINS: readonly SkinSpec[] = [
     nameKey: 'skin_void_reaper',
     category: 'milestone',
     unlockDescKey: 'skin_unlock_biome_4',
+    passiveId: 'phase_cleave',
+    passiveTitleKey: 'passive_phase_cleave',
+    passiveDescKey: 'passive_phase_cleave_desc',
     primaryColor: '#818cf8',
     secondaryColor: '#0f172a',
     trailColor: '#e0f2fe',
@@ -546,9 +747,11 @@ export function calcBlockHP(
   const mult = ENTITY_STATS[kind].hpMult;
   if (!Number.isFinite(mult)) return Number.POSITIVE_INFINITY;
   const ascHp = getAscensionHpMultiplier(ascensionTier);
+  const d = Math.max(0, depthMeters);
+  const deepRamp = d > 150 ? Math.pow(1 + (d - 150) / 146, 1.36) : 1;
   return Math.max(
     1,
-    Math.floor(13 * Math.pow(1 + 0.0155 * Math.max(0, depthMeters), 1.38) * mult * ascHp)
+    Math.floor(13 * Math.pow(1 + 0.0155 * d, 1.38) * deepRamp * mult * ascHp)
   );
 }
 
@@ -568,13 +771,51 @@ export function calcCoinValue(
   return Math.max(
     1,
     Math.floor(
-      2 * (1 + 0.005 * Math.max(0, depthMeters)) * biomeMult * oreMult * valMult * prestigeMult * ascCoin
+      2 * (1 + 0.0018 * Math.max(0, depthMeters)) * biomeMult * oreMult * valMult * prestigeMult * ascCoin
     )
   );
 }
 
 export function calcUpgradeCost(spec: UpgradeSpec, currentLevel: number): number {
+  if (spec.id === 'dronebay' && currentLevel <= 0) {
+    return Math.floor(spec.baseCost * 0.6);
+  }
   return Math.floor(spec.baseCost * Math.pow(spec.growthRate, Math.max(0, currentLevel - 1)));
+}
+
+export function calcMagPulseCooldownS(overclockCoreLevel: number): number {
+  const reduction =
+    Math.max(0, overclockCoreLevel - 1) * SKILL_CONFIG.MAG_PULSE_COOLDOWN_REDUCTION_PER_LV;
+  return Math.max(
+    SKILL_CONFIG.MAG_PULSE_MIN_COOLDOWN_S,
+    SKILL_CONFIG.MAG_PULSE_BASE_COOLDOWN_S - reduction
+  );
+}
+
+export function calcOverclockDurationS(overclockCoreLevel: number, surgeStacks: number = 0): number {
+  return (
+    SKILL_CONFIG.OVERCLOCK_BASE_DURATION_S +
+    Math.max(0, overclockCoreLevel - 1) * SKILL_CONFIG.OVERCLOCK_DURATION_PER_LV +
+    surgeStacks * 1.5
+  );
+}
+
+export function calcRelicPotencyMult(relicForgeLevel: number): number {
+  return 1 + Math.max(0, relicForgeLevel - 1) * 0.12;
+}
+
+export function calcDroneStats(
+  droneBayLevel: number,
+  drillDamage: number
+): { unlocked: boolean; fireIntervalS: number; beamDamage: number; magnetRadiusPx: number } {
+  const lv = Math.max(0, Math.floor(droneBayLevel));
+  const effLv = Math.max(1, lv);
+  return {
+    unlocked: lv >= 1,
+    fireIntervalS: Math.max(0.45, 1.35 - (effLv - 1) * 0.075),
+    beamDamage: Math.max(4, drillDamage * (0.35 + (effLv - 1) * 0.08)),
+    magnetRadiusPx: 95 + (effLv - 1) * 14,
+  };
 }
 
 export function calcDrillDamage(
@@ -583,7 +824,7 @@ export function calcDrillDamage(
   ascensionTier: number = 0
 ): number {
   const l = Math.max(1, level) - 1;
-  const base = 10 + 8 * l + 1.5 * l * l;
+  const base = 10 + 8.5 * l + 1.65 * l * l;
   return base * (1 + prestigeLevel * PRESTIGE_BONUS_PER_LEVEL) * getAscensionDamageBonus(ascensionTier);
 }
 

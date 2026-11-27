@@ -5,7 +5,6 @@ import {
 import { i18n, type TranslationKey } from '../i18n/translations';
 import { formatCompact } from '../utils/format';
 import { AdButton } from './AdButton';
-import { svgIcon } from './icons';
 import { UI_ICONS, getCrestUrlForTier } from './uiAssets';
 
 export interface AscensionVictoryOptions {
@@ -83,7 +82,7 @@ export class AscensionVictoryModal {
               <div style="font-size:20px;font-weight:900;color:#fde047;text-shadow:0 2px 0 #120c08;">${opts.maxCombo}x</div>
             </div>
             <div class="rm-stat-plaque">
-              <span class="rm-stat-coin-svg">${svgIcon('coin')}</span>
+              <img src="${UI_ICONS.coinStack}" style="width:32px;height:32px;object-fit:contain;" alt="" />
               <div style="font-size:10px;color:#cbd5e1;font-weight:900;letter-spacing:0.4px;">${i18n.t('earned_coins').toUpperCase()}</div>
               <div style="font-size:20px;font-weight:900;color:#fbbf24;text-shadow:0 2px 0 #120c08;" data-vic="coins">${formatCompact(opts.coinsEarned)}</div>
             </div>

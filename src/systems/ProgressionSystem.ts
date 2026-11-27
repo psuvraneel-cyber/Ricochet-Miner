@@ -137,6 +137,9 @@ export class ProgressionSystem {
       orbsize: 1,
       luck: 1,
       orevalue: 1,
+      dronebay: 0,
+      relicforge: 1,
+      overclockcore: 1,
     };
     return true;
   }

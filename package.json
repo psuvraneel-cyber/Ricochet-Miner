@@ -9,6 +9,7 @@
     "playtest": "vitest run tests/autonomous-playtest.test.ts",
     "typecheck": "tsc --noEmit",
     "assets:process": "node scripts/process-assets.mjs",
+    "audio:process": "node scripts/process-audio.mjs",
     "marketing:covers": "node scripts/export-marketing.mjs",
     "marketing:capture": "node scripts/capture-marketing.mjs",
     "build:crazygames": "node scripts/package-portals.mjs crazygames",

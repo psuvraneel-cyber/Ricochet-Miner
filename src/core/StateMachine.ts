@@ -3,6 +3,7 @@ export type GameState =
   | 'TITLE'
   | 'AIMING'
   | 'RUNNING'
+  | 'PERK_DRAFT'
   | 'PAUSED'
   | 'RUN_SUMMARY'
   | 'ASCENSION_VICTORY'

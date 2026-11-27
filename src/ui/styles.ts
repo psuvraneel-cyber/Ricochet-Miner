@@ -826,6 +826,217 @@ export function injectGameStyles(): void {
       border-radius: 16px;
       box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.5), 0 5px 0 #14532d, 0 8px 18px rgba(34, 197, 94, 0.35);
     }
+    .rm-running-skills {
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: calc(100vw - 12px);
+      gap: 6px;
+    }
+    .rm-running-skills .rm-btn {
+      padding: 5px 9px;
+      min-height: 40px;
+      font-size: 12px;
+    }
+    .rm-skill-btn {
+      position: relative;
+      overflow: hidden;
+      padding: 4px 9px;
+      min-height: 40px;
+      gap: 6px;
+      background: linear-gradient(180deg, #1e3a5f 0%, #0f172a 100%);
+      border-color: #38bdf8;
+    }
+    .rm-skill-btn.ready {
+      box-shadow: 0 0 14px rgba(34, 211, 238, 0.55), 0 4px 0 #120c08;
+    }
+    .rm-skill-btn.active,
+    .rm-skill-btn.active:disabled {
+      opacity: 1;
+      background: linear-gradient(180deg, #ea580c 0%, #9a3412 100%);
+      border-color: #fde047;
+      box-shadow: 0 0 16px rgba(251, 191, 36, 0.65), 0 4px 0 #120c08;
+    }
+    .rm-skill-btn:disabled:not(.active) {
+      opacity: 0.78;
+    }
+    .rm-skill-sweep {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0;
+    }
+    .rm-skill-ico {
+      width: 26px;
+      height: 26px;
+      object-fit: contain;
+      position: relative;
+      z-index: 1;
+    }
+    .rm-skill-col {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      line-height: 1.1;
+      position: relative;
+      z-index: 1;
+    }
+    .rm-skill-sub {
+      font-size: 9px;
+      color: #bae6fd;
+      letter-spacing: 0.4px;
+    }
+    .rm-perk-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      justify-content: flex-start;
+      pointer-events: none;
+      max-width: calc(100vw - 24px);
+    }
+    .rm-perk-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: rgba(20, 14, 11, 0.88);
+      border: 1.5px solid #fbbf24;
+      border-radius: 999px;
+      padding: 2px 7px;
+      font-size: 10px;
+      font-weight: 800;
+      color: #fffbeb;
+    }
+    .rm-perk-modal-shell {
+      width: min(560px, 95vw);
+    }
+    .rm-title-ribbon-wrap {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+    }
+    .rm-title-ribbon-bg {
+      position: absolute;
+      inset: -4px auto;
+      width: min(320px, 78vw);
+      height: 50px;
+      object-fit: fill;
+      pointer-events: none;
+      opacity: 0.94;
+    }
+    .rm-title-ribbon-txt {
+      position: relative;
+      z-index: 1;
+      font-weight: 900;
+      font-size: 15px;
+      color: #fffbeb;
+      letter-spacing: 0.8px;
+      text-shadow: 0 2px 0 #120c08;
+    }
+    .rm-perk-sub {
+      text-align: center;
+      font-size: 12px;
+      color: #fde68a;
+      font-weight: 800;
+    }
+    .rm-perk-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .rm-perk-card {
+      background: linear-gradient(180deg, #3c2e24 0%, #201712 100%);
+      border: 2.5px solid #fbbf24;
+      border-radius: 14px;
+      padding: 10px 8px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      text-align: center;
+      cursor: pointer;
+      color: #fffbeb;
+      box-shadow: inset 0 2px 0 rgba(255, 235, 195, 0.2), 0 4px 0 #120c08;
+      transition: transform 0.12s ease, box-shadow 0.12s ease;
+    }
+    .rm-perk-card:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 0 18px rgba(251, 191, 36, 0.45), 0 6px 0 #120c08;
+    }
+    .rm-perk-badge {
+      font-size: 9px;
+      font-weight: 900;
+      color: #120c08;
+      padding: 2px 7px;
+      border-radius: 999px;
+      letter-spacing: 0.5px;
+    }
+    .rm-perk-icon-wrap {
+      position: relative;
+      width: 54px;
+      height: 54px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .rm-perk-card-bg {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      opacity: 0.42;
+    }
+    .rm-perk-ico {
+      position: relative;
+      z-index: 1;
+      transform: scale(1.4);
+    }
+    .rm-perk-title {
+      font-weight: 900;
+      font-size: 12px;
+      color: #fef08a;
+      text-shadow: 0 2px 0 #120c08;
+    }
+    .rm-perk-desc {
+      font-size: 10px;
+      color: #e2e8f0;
+      line-height: 1.3;
+    }
+    .rm-skin-passive {
+      width: 100%;
+      background: rgba(15, 23, 42, 0.72);
+      border: 1.5px solid #475569;
+      border-radius: 8px;
+      padding: 4px 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .rm-skin-passive-title {
+      font-size: 10px;
+      font-weight: 900;
+      color: #38bdf8;
+    }
+    .rm-skin-passive-desc {
+      font-size: 9.5px;
+      color: #cbd5e1;
+      line-height: 1.25;
+    }
+    .rm-user-pill {
+      color: #bae6fd;
+      border-color: #38bdf8;
+    }
+    @media (max-width: 520px) {
+      .rm-perk-grid {
+        grid-template-columns: 1fr;
+      }
+      .rm-skill-btn {
+        min-height: 38px;
+        padding: 4px 7px;
+        font-size: 11px;
+      }
+    }
     @media (max-width: 430px) {
       .rm-pill {
         padding: 4px 8px;

@@ -1,9 +1,12 @@
+import { sharedSpriteAtlas, type AdditiveVfxKey, type ChunkSpriteKey } from './SpriteAtlas';
+
 export type ParticleKind = 'shard' | 'spark' | 'smoke' | 'confetti';
 
 export interface Particle {
   active: boolean;
   kind: ParticleKind;
   additive: boolean;
+  spriteKey?: string;
   x: number;
   y: number;
   vx: number;
@@ -31,6 +34,7 @@ export class ParticlePool {
         active: false,
         kind: 'shard',
         additive: false,
+        spriteKey: undefined,
         x: 0,
         y: 0,
         vx: 0,
@@ -58,7 +62,8 @@ export class ParticlePool {
     size: number = 4,
     maxLife: number = 0.45,
     kind: ParticleKind = 'shard',
-    additive: boolean = false
+    additive: boolean = false,
+    spriteKey?: string
   ): void {
     for (let i = 0; i < count; i++) {
       const p = this.pool[this.cursor];
@@ -69,6 +74,7 @@ export class ParticlePool {
       p.active = true;
       p.kind = kind;
       p.additive = additive;
+      p.spriteKey = spriteKey;
       p.x = x;
       p.y = y;
       p.vx = Math.cos(angle) * speed;
@@ -87,6 +93,7 @@ export class ParticlePool {
 
   emitSparks(x: number, y: number, count: number, color: string = '#fde047'): void {
     this.emitBurst(x, y, count, color, 140, 420, 3.2, 0.28, 'spark', true);
+    this.emitAdditiveSprite(x, y, 'spark_star', color, 34, 0.22);
   }
 
   emitDirectionalBurst(
@@ -113,6 +120,7 @@ export class ParticlePool {
       p.active = true;
       p.kind = kind;
       p.additive = additive;
+      p.spriteKey = undefined;
       p.x = x;
       p.y = y;
       p.vx = Math.cos(angle) * speed;
@@ -129,8 +137,44 @@ export class ParticlePool {
     }
   }
 
-  emitRockShards(x: number, y: number, count: number, color: string): void {
-    this.emitBurst(x, y, count, color, 80, 290, 5.2, 0.48, 'shard', false);
+  emitRockShards(
+    x: number,
+    y: number,
+    count: number,
+    color: string,
+    chunkKey: ChunkSpriteKey = 'slate'
+  ): void {
+    this.emitBurst(x, y, count, color, 80, 290, 9.5, 0.52, 'shard', false, chunkKey);
+  }
+
+  emitAdditiveSprite(
+    x: number,
+    y: number,
+    vfxKey: AdditiveVfxKey,
+    color: string = '#ffffff',
+    size: number = 48,
+    maxLife: number = 0.32,
+    rotation: number = Math.random() * Math.PI * 2
+  ): void {
+    const p = this.pool[this.cursor];
+    this.cursor = (this.cursor + 1) % POOL_CAPACITY;
+    p.active = true;
+    p.kind = 'spark';
+    p.additive = true;
+    p.spriteKey = vfxKey;
+    p.x = x;
+    p.y = y;
+    p.vx = 0;
+    p.vy = 0;
+    p.size = size;
+    p.rotation = rotation;
+    p.vr = 0;
+    p.drag = 0.98;
+    p.color = color;
+    p.alpha = 1;
+    p.life = maxLife;
+    p.maxLife = maxLife;
+    p.gravity = 0;
   }
 
   emitSmokePuff(x: number, y: number, count: number, color: string = '#475569'): void {
@@ -170,29 +214,54 @@ export class ParticlePool {
         ctx.arc(p.x, p.y, p.size * expand, 0, Math.PI * 2);
         ctx.fill();
       } else {
+        const chunkImg = p.spriteKey
+          ? sharedSpriteAtlas.getChunkSprite(p.spriteKey as ChunkSpriteKey)
+          : null;
         ctx.save();
         ctx.translate(p.x, p.y);
         ctx.rotate(p.rotation);
-        const half = p.size * 0.5;
-        ctx.beginPath();
-        ctx.moveTo(-half, -half * 0.6);
-        ctx.lineTo(half * 0.8, -half);
-        ctx.lineTo(half, half * 0.7);
-        ctx.lineTo(-half * 0.7, half);
-        ctx.closePath();
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(24, 18, 16, 0.6)';
-        ctx.lineWidth = 1;
-        ctx.stroke();
+        if (chunkImg) {
+          const s = p.size * 1.65;
+          ctx.drawImage(chunkImg, -s * 0.5, -s * 0.5, s, s);
+        } else {
+          const half = p.size * 0.5;
+          ctx.beginPath();
+          ctx.moveTo(-half, -half * 0.6);
+          ctx.lineTo(half * 0.8, -half);
+          ctx.lineTo(half, half * 0.7);
+          ctx.lineTo(-half * 0.7, half);
+          ctx.closePath();
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(24, 18, 16, 0.6)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
         ctx.restore();
       }
     }
 
-    // Pass 2: Additive luminescent spark streaks
+    // Pass 2: Additive luminescent sprite VFX & spark streaks
     ctx.globalCompositeOperation = 'lighter';
     for (let i = 0; i < POOL_CAPACITY; i++) {
       const p = this.pool[i];
       if (!p.active || !p.additive) continue;
+      if (p.spriteKey) {
+        const vfxImg = sharedSpriteAtlas.getAdditiveVfxSprite(p.spriteKey as AdditiveVfxKey);
+        if (vfxImg) {
+          const progress = 1 - p.alpha;
+          const expand = p.spriteKey === 'shockwave_ring' || p.spriteKey === 'tnt_fireball'
+            ? 0.55 + progress * 0.85
+            : 0.75 + progress * 0.45;
+          const drawSize = p.size * expand;
+          ctx.save();
+          ctx.globalAlpha = Math.min(1, p.alpha * 1.1);
+          ctx.translate(p.x, p.y);
+          ctx.rotate(p.rotation);
+          ctx.drawImage(vfxImg, -drawSize * 0.5, -drawSize * 0.5, drawSize, drawSize);
+          ctx.restore();
+          continue;
+        }
+      }
       ctx.globalAlpha = Math.min(1, p.alpha * 1.15);
       ctx.strokeStyle = p.color;
       ctx.lineWidth = Math.max(1.5, p.size * 0.65);

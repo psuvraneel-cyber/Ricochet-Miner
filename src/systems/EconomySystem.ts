@@ -1,12 +1,17 @@
 import {
   UPGRADES,
   calcDrillDamage,
+  calcDroneStats,
+  calcMagPulseCooldownS,
   calcMaxBounces,
   calcMultiOrbCount,
   calcOrbRadius,
   calcOreValueMultiplier,
+  calcOverclockDurationS,
+  calcRelicPotencyMult,
   calcUpgradeCost,
   getAscensionCapBonus,
+  SKILL_CONFIG,
   type UpgradeId,
   type UpgradeSpec,
 } from '../config/gameConfig';
@@ -20,6 +25,7 @@ export class EconomySystem {
   }
 
   getLevel(save: SaveData, id: UpgradeId): number {
+    if (id === 'dronebay') return save.upgrades[id] ?? 0;
     return save.upgrades[id] ?? 1;
   }
 
@@ -95,5 +101,32 @@ export class EconomySystem {
 
   getEffectiveOreValueMultiplier(save: SaveData): number {
     return calcOreValueMultiplier(save.upgrades.orevalue);
+  }
+
+  getMagPulseCooldownS(save: SaveData): number {
+    return calcMagPulseCooldownS(save.upgrades.overclockcore ?? 1);
+  }
+
+  getOverclockDurationS(save: SaveData, surgeStacks: number = 0): number {
+    return calcOverclockDurationS(save.upgrades.overclockcore ?? 1, surgeStacks);
+  }
+
+  getRelicPotencyMult(save: SaveData): number {
+    return calcRelicPotencyMult(save.upgrades.relicforge ?? 1);
+  }
+
+  isDroneUnlocked(save: SaveData): boolean {
+    return (
+      (save.upgrades.dronebay ?? 0) >= 1 ||
+      save.maxDepthMeters >= SKILL_CONFIG.DRONE_FREE_UNLOCK_DEPTH_M
+    );
+  }
+
+  getDroneStats(save: SaveData) {
+    const lv = Math.max(
+      save.upgrades.dronebay ?? 0,
+      save.maxDepthMeters >= SKILL_CONFIG.DRONE_FREE_UNLOCK_DEPTH_M ? 1 : 0
+    );
+    return calcDroneStats(lv, this.getEffectiveDrillDamage(save));
   }
 }

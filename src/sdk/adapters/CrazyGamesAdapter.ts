@@ -10,6 +10,11 @@ interface CrazyGamesSDKGlobal {
         locale?: string;
         device?: { type?: string };
       };
+      getUser?: () => Promise<{ username?: string; profilePictureUrl?: string } | null>;
+    };
+    leaderboards?: {
+      submitScore?: (score: number) => void;
+      showLeaderboard?: () => void;
     };
     game?: {
       loadingStart?: () => void;
@@ -17,6 +22,11 @@ interface CrazyGamesSDKGlobal {
       gameplayStart?: () => void;
       gameplayStop?: () => void;
       happytime?: () => void;
+      settings?: {
+        muteAudio?: boolean;
+      };
+      addSettingsChangeListener?: (listener: (settings: { muteAudio?: boolean }) => void) => void;
+      removeSettingsChangeListener?: (listener: (settings: { muteAudio?: boolean }) => void) => void;
     };
     ad?: {
       hasAdblock?: () => Promise<boolean>;
@@ -43,6 +53,17 @@ interface CrazyGamesSDKGlobal {
 
 const BANNER_COOLDOWN_MS = 60_000;
 
+function readQueryMuteAudio(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const search = window.location?.search;
+    if (typeof search !== 'string' || !search) return false;
+    return new URLSearchParams(search).get('muteAudio') === 'true';
+  } catch {
+    return false;
+  }
+}
+
 export class CrazyGamesAdapter implements IPortalAdapter {
   readonly name = 'crazygames';
   readonly supportsBanners = true;
@@ -50,9 +71,44 @@ export class CrazyGamesAdapter implements IPortalAdapter {
 
   private disabled = false;
   private lastBannerRequestMs = new Map<string, number>();
+  private platformMuted = readQueryMuteAudio();
+  private muteListeners = new Set<(muted: boolean) => void>();
+  private settingsListener: ((settings: { muteAudio?: boolean }) => void) | null = null;
+  private adCallbacks: { onAdStarted?: () => void; onAdEnded?: () => void } = {};
 
   private get sdk() {
     return (window as unknown as { CrazyGames?: CrazyGamesSDKGlobal }).CrazyGames?.SDK;
+  }
+
+  private setPlatformMuted(muted: boolean): void {
+    const effective = Boolean(muted) || readQueryMuteAudio();
+    if (effective === this.platformMuted) return;
+    this.platformMuted = effective;
+    for (const cb of this.muteListeners) {
+      try {
+        cb(effective);
+      } catch {
+        // ignore listener failure
+      }
+    }
+  }
+
+  isPlatformMuted(): boolean {
+    if (this.settingsListener) {
+      return this.platformMuted || readQueryMuteAudio();
+    }
+    return this.platformMuted || readQueryMuteAudio() || Boolean(this.sdk?.game?.settings?.muteAudio);
+  }
+
+  onPlatformMuteChange(cb: (muted: boolean) => void): () => void {
+    this.muteListeners.add(cb);
+    return () => {
+      this.muteListeners.delete(cb);
+    };
+  }
+
+  setAdCallbacks(callbacks: { onAdStarted?: () => void; onAdEnded?: () => void }): void {
+    this.adCallbacks = callbacks;
   }
 
   isDisabled(): boolean {
@@ -62,6 +118,7 @@ export class CrazyGamesAdapter implements IPortalAdapter {
   }
 
   async init(): Promise<void> {
+    this.setPlatformMuted(readQueryMuteAudio());
     try {
       const sdk = this.sdk;
       if (!sdk || sdk.environment === 'disabled' || !sdk.init) {
@@ -71,6 +128,14 @@ export class CrazyGamesAdapter implements IPortalAdapter {
       await sdk.init();
       if (this.sdk?.environment === 'disabled') {
         this.disabled = true;
+        return;
+      }
+      this.setPlatformMuted(Boolean(this.sdk?.game?.settings?.muteAudio));
+      if (!this.settingsListener && typeof this.sdk?.game?.addSettingsChangeListener === 'function') {
+        this.settingsListener = (settings) => {
+          this.setPlatformMuted(Boolean(settings?.muteAudio));
+        };
+        this.sdk.game.addSettingsChangeListener(this.settingsListener);
       }
     } catch {
       this.disabled = true;
@@ -150,16 +215,21 @@ export class CrazyGamesAdapter implements IPortalAdapter {
       const timer = setTimeout(() => {
         if (!settled) {
           settled = true;
+          this.adCallbacks.onAdEnded?.();
           resolve({ rewarded: false, reason: 'error' });
         }
       }, 60000);
 
       try {
         requestAdFn(type, {
+          adStarted: () => {
+            this.adCallbacks.onAdStarted?.();
+          },
           adFinished: () => {
             if (!settled) {
               settled = true;
               clearTimeout(timer);
+              this.adCallbacks.onAdEnded?.();
               resolve({ rewarded: true, reason: 'finished' });
             }
           },
@@ -167,6 +237,7 @@ export class CrazyGamesAdapter implements IPortalAdapter {
             if (!settled) {
               settled = true;
               clearTimeout(timer);
+              this.adCallbacks.onAdEnded?.();
               const msg = String((err as { code?: string; message?: string })?.code ?? err ?? '').toLowerCase();
               const isAdblock = msg.includes('adblock');
               resolve({ rewarded: false, reason: isAdblock ? 'adblock' : 'error' });
@@ -177,6 +248,7 @@ export class CrazyGamesAdapter implements IPortalAdapter {
         if (!settled) {
           settled = true;
           clearTimeout(timer);
+          this.adCallbacks.onAdEnded?.();
           resolve({ rewarded: false, reason: 'error' });
         }
       }
@@ -259,5 +331,40 @@ export class CrazyGamesAdapter implements IPortalAdapter {
 
   getServerTimeMs(): number {
     return Date.now();
+  }
+
+  supportsLeaderboards(): boolean {
+    return !this.isDisabled() && Boolean(this.sdk?.leaderboards?.submitScore);
+  }
+
+  async getUser(): Promise<{ username: string; avatarUrl?: string } | null> {
+    if (this.isDisabled()) return null;
+    try {
+      const user = await this.sdk?.user?.getUser?.();
+      if (user && typeof user.username === 'string' && user.username.trim().length > 0) {
+        return { username: user.username.trim(), avatarUrl: user.profilePictureUrl };
+      }
+    } catch {
+      // guest / blocked
+    }
+    return null;
+  }
+
+  submitLeaderboardScore(score: number): void {
+    if (this.isDisabled()) return;
+    try {
+      this.sdk?.leaderboards?.submitScore?.(Math.floor(Math.max(0, score)));
+    } catch {
+      // ignore
+    }
+  }
+
+  showLeaderboard(): void {
+    if (this.isDisabled()) return;
+    try {
+      this.sdk?.leaderboards?.showLeaderboard?.();
+    } catch {
+      // ignore
+    }
   }
 }

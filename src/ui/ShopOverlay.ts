@@ -156,7 +156,7 @@ export class ShopOverlay {
           <img src="${UI_ICONS.drillDamage}" style="width:18px;height:18px;object-fit:contain;" alt="" /> ${i18n.t('upgrades')}
         </button>
         <button class="rm-btn ${this.tab === 'skins' ? 'rm-btn-primary' : ''}" data-tab="skins">
-          ${svgIcon('palette')} ${i18n.t('skins')}
+          <img src="${UI_ICONS.armorySkins}" style="width:18px;height:18px;object-fit:contain;" alt="" /> ${i18n.t('skins')}
         </button>
       </div>
       <button class="rm-btn rm-close-btn" data-act="close" aria-label="Close">${svgIcon('close')}</button>
@@ -255,6 +255,10 @@ export class ShopOverlay {
               <img src="${thumbUrl}" alt="${i18n.t(skin.nameKey as TranslationKey)}" />
             </div>
             <div class="rm-skin-name">${i18n.t(skin.nameKey as TranslationKey)}</div>
+            <div class="rm-skin-passive">
+              <span class="rm-skin-passive-title">${i18n.t(skin.passiveTitleKey as TranslationKey)}</span>
+              <span class="rm-skin-passive-desc">${i18n.t(skin.passiveDescKey as TranslationKey)}</span>
+            </div>
             ${actionHtml}
           </div>
         `;

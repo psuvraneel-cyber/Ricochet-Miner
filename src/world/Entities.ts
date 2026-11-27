@@ -43,16 +43,31 @@ export interface BlockEntity {
   renderX?: number;
   width: number;
   height: number;
-  radius: number; // used for circular bumpers & portals
+  radius: number; // used for circular bumpers, portals & pickups
   hp: number;
   maxHp: number;
   depthMeters: number;
   biomeIndex: number;
   hitFlashTimer: number;
+  burnTimer?: number;
+  burnDps?: number;
+  vy?: number; // falling Boss Shards
   hitsRemaining?: number; // for pinball bumper (5 hits)
   bossCoreIndex?: number; // 0, 1, 2 for boss_core
   portalTargetId?: number; // for portal_entry -> portal_exit
   alive: boolean;
+}
+
+export interface CompanionDroneState {
+  active: boolean;
+  x: number;
+  y: number;
+  bobPhase: number;
+  propRotation: number;
+  fireCooldown: number;
+  targetX: number | null;
+  targetY: number | null;
+  beamTimer: number;
 }
 
 export interface CoinDrop {

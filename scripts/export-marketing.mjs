@@ -47,15 +47,73 @@ async function classifySources() {
   return { square, landscape, portrait };
 }
 
+async function removeCornerSparkle(inputPath) {
+  const { data, info } = await sharp(inputPath).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const w = info.width;
+  const h = info.height;
+  const startX = Math.floor(w * 0.89);
+  const startY = Math.floor(h * 0.89);
+
+  // Sample median luminance in nearby clean neighborhood to locate bottom-right star glare
+  const samples = [];
+  for (let y = Math.floor(h * 0.8); y < startY; y += 3) {
+    for (let x = Math.floor(w * 0.8); x < startX; x += 3) {
+      const p = (y * w + x) * 4;
+      samples.push(0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2]);
+    }
+  }
+  samples.sort((a, b) => a - b);
+  const med = samples.length > 0 ? samples[Math.floor(samples.length * 0.5)] : 70;
+
+  const mask = new Uint8Array(w * h);
+  for (let y = startY; y < h; y++) {
+    for (let x = startX; x < w; x++) {
+      const p = (y * w + x) * 4;
+      const maxC = Math.max(data[p], data[p + 1], data[p + 2]);
+      const minC = Math.min(data[p], data[p + 1], data[p + 2]);
+      const sat = maxC > 0 ? (maxC - minC) / maxC : 0;
+      const lum = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
+      if (lum > med + 28 && sat < 0.28) mask[y * w + x] = 1;
+    }
+  }
+
+  const out = Buffer.from(data);
+  const shiftX = Math.max(24, Math.floor(w * 0.08));
+  for (let y = startY; y < h; y++) {
+    for (let x = startX; x < w; x++) {
+      let hasStar = mask[y * w + x];
+      if (!hasStar) {
+        for (let dy = -3; dy <= 3 && !hasStar; dy++) {
+          for (let dx = -3; dx <= 3; dx++) {
+            const ny = y + dy;
+            const nx = x + dx;
+            if (ny >= 0 && ny < h && nx >= 0 && nx < w && mask[ny * w + nx]) hasStar = 1;
+          }
+        }
+      }
+      if (!hasStar) continue;
+      const sx = Math.max(0, x - shiftX);
+      const dst = (y * w + x) * 4;
+      const src = (y * w + sx) * 4;
+      out[dst] = data[src];
+      out[dst + 1] = data[src + 1];
+      out[dst + 2] = data[src + 2];
+      out[dst + 3] = 255;
+    }
+  }
+  return sharp(out, { raw: { width: w, height: h, channels: 4 } }).png().toBuffer();
+}
+
 async function exportCover(src, outName, targetW, targetH) {
   const outPath = path.join(OUT_DIR, outName);
-  // Trim 2% top/left and 6% bottom/right (92%x92%) to strip any bottom-right corner mark cleanly
-  const cropW = Math.floor(src.width * 0.92);
-  const cropH = Math.floor(src.height * 0.92);
+  const healedBuf = await removeCornerSparkle(src.path);
+  // Subtle symmetrical trim (2% inset) preserving key art while guaranteeing zero edge mark
+  const cropW = Math.floor(src.width * 0.96);
+  const cropH = Math.floor(src.height * 0.96);
   const left = Math.floor(src.width * 0.02);
   const top = Math.floor(src.height * 0.02);
 
-  await sharp(src.path)
+  await sharp(healedBuf)
     .extract({ left, top, width: cropW, height: cropH })
     .resize(targetW, targetH, {
       fit: 'cover',

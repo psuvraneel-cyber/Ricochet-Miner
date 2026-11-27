@@ -91,7 +91,7 @@ export class RunSummaryModal {
 
         <div class="rm-stat-row">
           <div class="rm-stat-plaque">
-            <span class="rm-stat-coin-svg">${svgIcon('coin')}</span>
+            <img src="${UI_ICONS.coinStack}" style="width:36px;height:36px;object-fit:contain;" alt="" />
             <div style="font-size:11px;color:#cbd5e1;font-weight:800;">${i18n.t('earned_coins')}</div>
             <div style="font-size:21px;font-weight:900;color:#fbbf24;text-shadow:0 2px 0 #120c08;">${formatCompact(opts.coinsEarned)}</div>
           </div>

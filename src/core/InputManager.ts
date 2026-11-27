@@ -12,12 +12,15 @@ export interface AimFeedback {
 
 export interface InputCallbacks {
   canAim: () => boolean;
+  isRunning?: () => boolean;
   getAimMode: () => 'slingshot' | 'direct';
   getLauncherPos: () => { x: number; y: number };
   clientToWorld: (clientX: number, clientY: number) => { x: number; y: number };
   onAimStart: () => void;
   onAimUpdate: (angleRad: number | null, canceled: boolean, feedback?: AimFeedback | null) => void;
   onLaunch: (angleRad: number) => void;
+  onActiveMagPulse?: () => void;
+  onActiveOverclock?: () => void;
   onQuickRelaunch: () => void;
   onToggleMute: () => void;
   onTogglePause: () => void;
@@ -102,7 +105,13 @@ export class InputManager {
   };
 
   private onPointerDown = (e: PointerEvent): void => {
-    if (this.locked || !this.callbacks.canAim()) return;
+    if (this.locked) return;
+    if (!this.callbacks.canAim()) {
+      if (e.target === this.canvas && this.callbacks.isRunning?.()) {
+        this.callbacks.onActiveMagPulse?.();
+      }
+      return;
+    }
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     if (this.isDragging || this.activePointerId !== null) return;
 
@@ -293,6 +302,17 @@ export class InputManager {
       const idx = Number(e.code.slice(5)) - 1;
       this.callbacks.onBuyUpgradeSlot(idx);
       return;
+    }
+
+    if (this.callbacks.isRunning?.()) {
+      if (e.code === 'Space') {
+        this.callbacks.onActiveMagPulse?.();
+        return;
+      }
+      if (e.code === 'KeyE') {
+        this.callbacks.onActiveOverclock?.();
+        return;
+      }
     }
 
     if (!this.callbacks.canAim()) return;

@@ -1,5 +1,5 @@
-import { toRomanNumeral } from '../config/gameConfig';
-import { i18n } from '../i18n/translations';
+import { toRomanNumeral, type ArtifactSpec } from '../config/gameConfig';
+import { i18n, type TranslationKey } from '../i18n/translations';
 import { PlatformSDK } from '../sdk/PlatformSDK';
 import { formatCompact, formatMeters } from '../utils/format';
 import { AdButton } from './AdButton';
@@ -18,6 +18,9 @@ export interface HUDCallbacks {
   onOpenDailyLogin: () => void;
   onOpenElevator: () => void;
   onTriggerOverdriveAd: () => void;
+  onMagPulse: () => void;
+  onOverclock: () => void;
+  onOpenLeaderboard?: () => void;
 }
 
 const FULL_SHAFT_STAR_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none"><path d="M12 2l2.6 5.5 6 .8-4.4 4.2 1.1 6-5.3-2.9-5.3 2.9 1.1-6L3.4 8.3l6-.8L12 2z" fill="#fde047" stroke="#1a1310" stroke-width="2" stroke-linejoin="round"/></svg>`;
@@ -60,6 +63,14 @@ export class HUDController {
   private gateTitleEl: HTMLElement;
   private gateHpTextEl: HTMLElement;
   private gateHpFillEl: HTMLElement;
+  private magPulseBtn: HTMLButtonElement;
+  private magPulseSweepEl: HTMLElement;
+  private magPulseLblEl: HTMLElement;
+  private overclockBtn: HTMLButtonElement;
+  private overclockStatusEl: HTMLElement;
+  private perkStripEl: HTMLElement;
+  private leaderboardBtn: HTMLButtonElement;
+  private userPillEl: HTMLElement;
 
   constructor(root: HTMLElement, callbacks: HUDCallbacks) {
     this.root = root;
@@ -80,6 +91,7 @@ export class HUDController {
           <span data-hud="crest-text">TIER I</span>
         </div>
         <div class="rm-pill" data-hud="bounces-pill" style="display:none;">${svgIcon('lightning')} <span data-hud="bounces">0</span></div>
+        <div class="rm-pill rm-user-pill" data-hud="user-pill" style="display:none;"></div>
       </div>
       <div class="rm-pill-row rm-pill-row-nowrap">
         <button class="rm-btn" data-interactive="true" data-hud="aim-mode" style="display:none;min-height:34px;padding:4px 8px;font-size:11px;" aria-label="Aim Mode">
@@ -90,6 +102,11 @@ export class HUDController {
       </div>
     `;
     topStack.appendChild(this.topEl);
+
+    this.perkStripEl = document.createElement('div');
+    this.perkStripEl.className = 'rm-perk-strip';
+    this.perkStripEl.style.display = 'none';
+    topStack.appendChild(this.perkStripEl);
 
     this.bossRowEl = document.createElement('div');
     this.bossRowEl.className = 'rm-boss-row';
@@ -134,6 +151,7 @@ export class HUDController {
     this.biomeEl = this.topEl.querySelector('[data-hud="biome"]')!;
     this.crestPillEl = this.topEl.querySelector('[data-hud="crest-pill"]')!;
     this.crestTextEl = this.topEl.querySelector('[data-hud="crest-text"]')!;
+    this.userPillEl = this.topEl.querySelector('[data-hud="user-pill"]')!;
     this.bouncesEl = this.topEl.querySelector('[data-hud="bounces"]')!;
     this.aimModeBtn = this.topEl.querySelector('[data-hud="aim-mode"]')!;
     this.aimModeLblEl = this.topEl.querySelector('[data-hud="aim-mode-lbl"]')!;
@@ -142,17 +160,39 @@ export class HUDController {
     this.muteBtn.addEventListener('click', callbacks.onToggleMute);
     this.topEl.querySelector('[data-hud="pause"]')?.addEventListener('click', callbacks.onTogglePause);
 
-    // Running controls (2x Speed & Recall)
+    // Running controls (Mag-Pulse Slam, Overclock Spin, 2x Speed & Recall — strictly zero Ad buttons)
     this.runningBar = document.createElement('div');
-    this.runningBar.className = 'rm-bottom-bar';
+    this.runningBar.className = 'rm-bottom-bar rm-running-skills';
     this.runningBar.style.display = 'none';
     this.runningBar.innerHTML = `
+      <button class="rm-btn rm-skill-btn" data-interactive="true" data-hud="magpulse">
+        <div class="rm-skill-sweep" data-hud="magpulse-sweep"></div>
+        <img src="${UI_ICONS.skillMagpulse}" class="rm-skill-ico" alt="" />
+        <span class="rm-skill-col">
+          <span data-lbl="magpulse">${i18n.t('skill_magpulse')}</span>
+          <span class="rm-skill-sub" data-hud="magpulse-lbl">[SPACE]</span>
+        </span>
+      </button>
+      <button class="rm-btn rm-skill-btn rm-skill-overclock" data-interactive="true" data-hud="overclock">
+        <img src="${UI_ICONS.skillOverclock}" class="rm-skill-ico" alt="" />
+        <span class="rm-skill-col">
+          <span data-lbl="overclock">${i18n.t('skill_overclock')}</span>
+          <span class="rm-skill-sub" data-hud="overclock-lbl">READY [E]</span>
+        </span>
+      </button>
       <button class="rm-btn" data-interactive="true" data-hud="speed">${svgIcon('fastForward')} <span data-lbl="speed">${i18n.t('fast_forward')}</span></button>
       <button class="rm-btn rm-btn-gold" data-interactive="true" data-hud="recall">${svgIcon('recall')} <span data-lbl="recall">${i18n.t('recall')}</span></button>
     `;
     this.root.appendChild(this.runningBar);
+    this.magPulseBtn = this.runningBar.querySelector('[data-hud="magpulse"]')!;
+    this.magPulseSweepEl = this.runningBar.querySelector('[data-hud="magpulse-sweep"]')!;
+    this.magPulseLblEl = this.runningBar.querySelector('[data-hud="magpulse-lbl"]')!;
+    this.overclockBtn = this.runningBar.querySelector('[data-hud="overclock"]')!;
+    this.overclockStatusEl = this.runningBar.querySelector('[data-hud="overclock-lbl"]')!;
     this.speedBtn = this.runningBar.querySelector('[data-hud="speed"]')!;
     this.recallBtn = this.runningBar.querySelector('[data-hud="recall"]')!;
+    this.magPulseBtn.addEventListener('click', callbacks.onMagPulse);
+    this.overclockBtn.addEventListener('click', callbacks.onOverclock);
     this.speedBtn.addEventListener('click', callbacks.onToggleSpeed);
     this.recallBtn.addEventListener('click', callbacks.onRecall);
 
@@ -161,7 +201,8 @@ export class HUDController {
     this.arcadeConsole.className = 'rm-arcade-console';
     this.arcadeConsole.innerHTML = `
       <button class="rm-btn rm-btn-primary" data-interactive="true" data-hud="shop">
-        ${svgIcon('upgradePickaxe')} <span data-lbl="upgrades">${i18n.t('upgrades').toUpperCase()}</span>
+        <img src="${UI_ICONS.armorySkins}" style="width:18px;height:18px;object-fit:contain;" alt="" />
+        <span data-lbl="upgrades">${i18n.t('upgrades').toUpperCase()}</span>
         <span class="rm-badge-count" data-hud="shop-badge" style="display:none;">0</span>
       </button>
       <button class="rm-btn" data-interactive="true" data-hud="achievements">
@@ -180,8 +221,12 @@ export class HUDController {
       <button class="rm-btn" data-interactive="true" data-hud="elevator" style="display:none;">
         ${svgIcon('elevatorCar')} <span data-lbl="elevator">${i18n.t('elevator')}</span>
       </button>
+      <button class="rm-btn" data-interactive="true" data-hud="leaderboard" style="display:none;">
+        <img src="${UI_ICONS.leaderboard}" style="width:18px;height:18px;object-fit:contain;" alt="" />
+        <span data-lbl="leaderboard">${i18n.t('leaderboard')}</span>
+      </button>
       <button class="rm-btn rm-btn-gold" data-interactive="true" data-hud="overdrive" style="display:none;flex-direction:column;gap:1px;padding:6px 10px;">
-        <span style="display:inline-flex;align-items:center;gap:6px;">${svgIcon('adPlay')} <span data-lbl="superorb">${i18n.t('super_orb_label')}</span></span>
+        <span style="display:inline-flex;align-items:center;gap:6px;"><img src="${UI_ICONS.superOrbToken}" style="width:18px;height:18px;object-fit:contain;" alt="" /> <span data-lbl="superorb">${i18n.t('super_orb_label')}</span></span>
         <span data-lbl="freead" style="font-size:10px;opacity:0.9;">${i18n.t('free_ad_sub')}</span>
       </button>
     `;
@@ -196,6 +241,7 @@ export class HUDController {
     this.loginBtn = this.arcadeConsole.querySelector('[data-hud="login"]')!;
     this.loginDotEl = this.arcadeConsole.querySelector('[data-hud="login-dot"]')!;
     this.elevatorBtn = this.arcadeConsole.querySelector('[data-hud="elevator"]')!;
+    this.leaderboardBtn = this.arcadeConsole.querySelector('[data-hud="leaderboard"]')!;
     this.overdriveBtn = this.arcadeConsole.querySelector('[data-hud="overdrive"]')!;
 
     this.shopBtn.addEventListener('click', callbacks.onOpenShop);
@@ -203,6 +249,7 @@ export class HUDController {
     this.questBtn.addEventListener('click', callbacks.onOpenQuests);
     this.loginBtn.addEventListener('click', callbacks.onOpenDailyLogin);
     this.elevatorBtn.addEventListener('click', callbacks.onOpenElevator);
+    this.leaderboardBtn.addEventListener('click', () => callbacks.onOpenLeaderboard?.());
     this.overdriveBtn.addEventListener('click', callbacks.onTriggerOverdriveAd);
 
     this.toastEl = document.createElement('div');
@@ -232,6 +279,9 @@ export class HUDController {
     set('[data-lbl="superorb"]', i18n.t('super_orb_label'));
     set('[data-lbl="freead"]', i18n.t('free_ad_sub'));
     set('[data-lbl="fullshaft"]', i18n.t('full_shaft_run'));
+    set('[data-lbl="magpulse"]', i18n.t('skill_magpulse'));
+    set('[data-lbl="overclock"]', i18n.t('skill_overclock'));
+    set('[data-lbl="leaderboard"]', i18n.t('leaderboard'));
   }
 
   update(params: {
@@ -261,6 +311,14 @@ export class HUDController {
       hp: number;
       maxHp: number;
     } | null;
+    magPulseCooldown?: number;
+    magPulseMaxCooldown?: number;
+    overclockCharges?: number;
+    overclockActiveTimer?: number;
+    overclockBreakProgress?: number;
+    activePerks?: Array<{ spec: ArtifactSpec; stacks: number }>;
+    playerName?: string | null;
+    supportsLeaderboard?: boolean;
   }): void {
     this.topEl.style.display = params.isTitle ? 'none' : 'flex';
     this.bossRowEl.style.display = params.isTitle ? 'none' : 'flex';
@@ -317,6 +375,58 @@ export class HUDController {
     this.questDotEl.style.display = params.hasClaimableQuest ? 'block' : 'none';
     this.shopBadgeEl.style.display = params.affordableUpgradeCount > 0 ? 'inline-flex' : 'none';
     this.shopBadgeEl.textContent = params.affordableUpgradeCount.toString();
+
+    // User Pill & Leaderboard
+    if (params.playerName) {
+      this.userPillEl.style.display = 'inline-flex';
+      this.userPillEl.textContent = params.playerName;
+    } else {
+      this.userPillEl.style.display = 'none';
+    }
+    this.leaderboardBtn.style.display = params.supportsLeaderboard ? 'inline-flex' : 'none';
+
+    // Active Running Skills
+    const magCd = Math.max(0, params.magPulseCooldown ?? 0);
+    const magMax = Math.max(0.1, params.magPulseMaxCooldown ?? 4);
+    const magRatio = magCd > 0 ? Math.min(1, magCd / magMax) : 0;
+    this.magPulseSweepEl.style.opacity = magCd > 0 ? '1' : '0';
+    this.magPulseSweepEl.style.background = `conic-gradient(rgba(10,12,18,0.78) ${(magRatio * 360).toFixed(0)}deg, transparent 0deg)`;
+    this.magPulseLblEl.textContent = magCd > 0 ? `${magCd.toFixed(1)}s` : '[SPACE]';
+    this.magPulseBtn.disabled = magCd > 0;
+    this.magPulseBtn.classList.toggle('ready', magCd <= 0);
+
+    const ocTimer = params.overclockActiveTimer ?? 0;
+    const ocCharges = params.overclockCharges ?? 0;
+    if (ocTimer > 0) {
+      this.overclockStatusEl.textContent = `${ocTimer.toFixed(1)}s`;
+      this.overclockBtn.disabled = true;
+      this.overclockBtn.classList.add('active');
+      this.overclockBtn.classList.remove('ready');
+    } else if (ocCharges > 0) {
+      this.overclockStatusEl.textContent = `${i18n.t('ready_short')} [E]`;
+      this.overclockBtn.disabled = false;
+      this.overclockBtn.classList.remove('active');
+      this.overclockBtn.classList.add('ready');
+    } else {
+      const prog = params.overclockBreakProgress ?? 0;
+      this.overclockStatusEl.textContent = `${prog}/20`;
+      this.overclockBtn.disabled = true;
+      this.overclockBtn.classList.remove('active', 'ready');
+    }
+
+    // Active Relic Perks Strip
+    const perks = params.activePerks ?? [];
+    if (!params.isTitle && perks.length > 0) {
+      this.perkStripEl.style.display = 'flex';
+      this.perkStripEl.innerHTML = perks
+        .map(
+          ({ spec, stacks }) =>
+            `<span class="rm-perk-pill" style="border-color:${spec.accentColor};">${svgIcon(spec.icon)} ${i18n.t(spec.nameKey as TranslationKey)}${stacks > 1 ? ` x${stacks}` : ''}</span>`
+        )
+        .join('');
+    } else {
+      this.perkStripEl.style.display = 'none';
+    }
   }
 
   showToast(message: string, durationMs: number = 2200): void {

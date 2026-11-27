@@ -220,6 +220,106 @@ function chromaKeyGreenFloodFill(data, width, height) {
 }
 
 /**
+ * Removes or heals the bottom-right Gemini 4-point corner watermark across different art types:
+ * - 'black': clears detected corner zone to pure #000000 for additive sheets
+ * - 'chroma_green' | 'chroma_magenta': clears corner zone to pure chroma key
+ * - 'opaque_inpaint': detects bright desaturated 4-point star pixels inside bottom-right 11%x11%
+ *   and heals them from clean neighboring opaque pixels without punching transparency holes
+ */
+function removeBottomRightWatermark(data, width, height, mode = 'opaque_inpaint') {
+  const out = Buffer.from(data);
+  const startX = Math.floor(width * 0.89);
+  const startY = Math.floor(height * 0.89);
+
+  if (mode === 'black' || mode === 'chroma_green' || mode === 'chroma_magenta') {
+    const rFill = mode === 'chroma_magenta' ? 255 : 0;
+    const gFill = mode === 'chroma_green' ? 255 : 0;
+    const bFill = mode === 'chroma_magenta' ? 255 : 0;
+    for (let y = startY; y < height; y++) {
+      for (let x = startX; x < width; x++) {
+        const p = (y * width + x) * 4;
+        out[p] = rFill;
+        out[p + 1] = gFill;
+        out[p + 2] = bFill;
+        out[p + 3] = 255;
+      }
+    }
+    return out;
+  }
+
+  // Sample median luminance outside the immediate corner cluster to distinguish star glare cleanly
+  const lumSamples = [];
+  const sampleMinX = Math.max(0, startX - Math.floor(width * 0.08));
+  const sampleMinY = Math.max(0, startY - Math.floor(height * 0.08));
+  for (let y = sampleMinY; y < startY; y += 2) {
+    for (let x = sampleMinX; x < startX; x += 2) {
+      const p = (y * width + x) * 4;
+      if (out[p + 3] < 200) continue;
+      lumSamples.push(0.299 * out[p] + 0.587 * out[p + 1] + 0.114 * out[p + 2]);
+    }
+  }
+  lumSamples.sort((a, b) => a - b);
+  const localMedian = lumSamples.length > 0 ? lumSamples[Math.floor(lumSamples.length * 0.5)] : 80;
+
+  const mask = new Uint8Array(width * height);
+  for (let y = startY; y < height; y++) {
+    for (let x = startX; x < width; x++) {
+      const p = (y * width + x) * 4;
+      if (out[p + 3] < 120) continue;
+      const r = out[p];
+      const g = out[p + 1];
+      const b = out[p + 2];
+      const maxC = Math.max(r, g, b);
+      const minC = Math.min(r, g, b);
+      const sat = maxC > 0 ? (maxC - minC) / maxC : 0;
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      if (lum > localMedian + 28 && sat < 0.28) {
+        mask[y * width + x] = 1;
+      }
+    }
+  }
+
+  // Dilate star mask by 2px to cover anti-aliased bright halo
+  const dilated = new Uint8Array(mask);
+  for (let y = startY; y < height; y++) {
+    for (let x = startX; x < width; x++) {
+      if (!mask[y * width + x]) continue;
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const ny = y + dy;
+          const nx = x + dx;
+          if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+            dilated[ny * width + nx] = 1;
+          }
+        }
+      }
+    }
+  }
+
+  // Clone-heal flagged star pixels from clean left/upper neighbor rock/texture bands
+  const shiftX = Math.max(12, Math.floor(width * 0.08));
+  for (let y = startY; y < height; y++) {
+    for (let x = startX; x < width; x++) {
+      if (!dilated[y * width + x]) continue;
+      let sx = Math.max(0, x - shiftX);
+      let sy = y;
+      if (dilated[sy * width + sx]) {
+        sx = x;
+        sy = Math.max(0, y - shiftX);
+      }
+      const dst = (y * width + x) * 4;
+      const src = (sy * width + sx) * 4;
+      out[dst] = data[src];
+      out[dst + 1] = data[src + 1];
+      out[dst + 2] = data[src + 2];
+      out[dst + 3] = data[src + 3];
+    }
+  }
+
+  return out;
+}
+
+/**
  * Finds tight non-transparent bounding box of an RGBA buffer.
  */
 function findTightBounds(data, width, height, alphaThreshold = 12) {
@@ -322,8 +422,8 @@ async function processSheetCell({
     chromaMode === 'green'
       ? chromaKeyGreenFloodFill(prepData, info.width, info.height)
       : chromaKeyMagenta(prepData, info.width, info.height, {
-          maskBottomRightPct: isBottomRightCell && maskSheetCorner ? 0.06 : 0,
-        });
+        maskBottomRightPct: isBottomRightCell && maskSheetCorner ? 0.06 : 0,
+      });
 
   const bounds = findTightBounds(keyed, info.width, info.height);
   const { data: trimmedData, info: trimmedInfo } = await sharp(keyed, {
@@ -376,8 +476,8 @@ async function processSheetCell({
 }
 
 /**
- * Crops bottom 8%, resizes to targetW x targetH, and applies a vertical
- * crossfade blend at the top/bottom seam so vertical tiling is seamless.
+ * Crops watermark margins (plus optional custom extract box), resizes to targetW x targetH,
+ * and applies wavy cosine crossfade + toroidal half-height offset for seamless vertical tiling.
  */
 async function processSeamlessVerticalTexture({
   srcName,
@@ -386,21 +486,24 @@ async function processSeamlessVerticalTexture({
   targetH,
   blendPx,
   trimHorizontalWhite = false,
+  cropTopPct = 0,
+  cropBottomPct = 0.08,
+  cropRightPct = 0.05,
 }) {
   const srcPath = path.join(RAW_DIR, srcName);
   const meta = await sharp(srcPath).metadata();
-  const cropH = Math.floor(meta.height * 0.92); // Remove bottom 8% mark
+  const top = Math.floor(meta.height * cropTopPct);
+  const cropH = Math.max(32, Math.floor(meta.height * (1 - cropTopPct - cropBottomPct)));
   let left = 0;
-  let cropW = meta.width;
+  let cropW = Math.floor(meta.width * (1 - cropRightPct));
   if (trimHorizontalWhite) {
-    // Trim outer 5% white/transparent border artifacts on timber beam
     left = Math.floor(meta.width * 0.05);
     cropW = Math.floor(meta.width * 0.9);
   }
 
   const overlap = Math.min(Math.floor(targetH * 0.2), Math.max(48, blendPx * 2));
   const { data, info } = await sharp(srcPath)
-    .extract({ left, top: 0, width: cropW, height: cropH })
+    .extract({ left, top, width: cropW, height: cropH })
     .resize(targetW, targetH + overlap, { fit: 'fill' })
     .ensureAlpha()
     .raw()
@@ -412,12 +515,11 @@ async function processSeamlessVerticalTexture({
   data.copy(out, 0, 0, w * h * 4);
 
   // Seamlessly fold bottom overflow band [targetH .. targetH + overlap) into top [0 .. overlap)
-  // along a wavy rock-strata contour so edge (0) == neighbor of edge (h - 1) with zero visible cut line.
   for (let x = 0; x < w; x++) {
     const wave = Math.round(Math.sin((x / w) * Math.PI * 4) * 10 + Math.cos((x / w) * Math.PI * 8) * 5);
     const colOverlap = Math.max(24, Math.min(overlap, overlap - 10 + wave));
     for (let y = 0; y < colOverlap; y++) {
-      const t = 0.5 - 0.5 * Math.cos((Math.PI * y) / colOverlap); // Smooth 0 -> 1 cosine ease
+      const t = 0.5 - 0.5 * Math.cos((Math.PI * y) / colOverlap);
       const dstIdx = (y * w + x) * 4;
       const tailY = Math.min(info.height - 1, h + y);
       const tailIdx = (tailY * w + x) * 4;
@@ -427,7 +529,7 @@ async function processSeamlessVerticalTexture({
     }
   }
 
-  // Toroidal half-height offset shifts the healed zone cleanly into the middle of continuous strata
+  // Toroidal half-height offset shifts the healed zone cleanly into continuous strata
   const shifted = Buffer.allocUnsafe(out.length);
   const halfH = Math.floor(h / 2);
   for (let y = 0; y < h; y++) {
@@ -441,6 +543,131 @@ async function processSeamlessVerticalTexture({
     .toFile(outPath);
   const sizeKb = (fs.statSync(outPath).size / 1024).toFixed(1);
   console.log(`[WEBP] ${outName} -> ${sizeKb} KB`);
+}
+
+/**
+ * Processes an additive (#000000 pure black) VFX sprite cell cleanly with zero alpha deletion,
+ * preserving glowing flame/spark falloff for Canvas 'lighter' compositing.
+ */
+async function processAdditiveCell({
+  sheetBuf,
+  sheetW,
+  sheetH,
+  cols,
+  rows,
+  col,
+  row,
+  outName,
+  targetSize = 160,
+}) {
+  const cellW = Math.floor(sheetW / cols);
+  const cellH = Math.floor(sheetH / rows);
+  const left = col * cellW;
+  const top = row * cellH;
+  const extractW = col === cols - 1 ? sheetW - left : cellW;
+  const extractH = row === rows - 1 ? sheetH - top : cellH;
+
+  const { data, info } = await sharp(sheetBuf, {
+    raw: { width: sheetW, height: sheetH, channels: 4 },
+  })
+    .extract({ left, top, width: extractW, height: extractH })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  // Find tight bounding box of non-black luminance pixels
+  let minX = info.width;
+  let minY = info.height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < info.height; y++) {
+    for (let x = 0; x < info.width; x++) {
+      const p = (y * info.width + x) * 4;
+      const lum = Math.max(data[p], data[p + 1], data[p + 2]);
+      if (lum > 18) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  const box =
+    maxX >= minX && maxY >= minY
+      ? { left: minX, top: minY, width: maxX - minX + 1, height: maxY - minY + 1 }
+      : { left: 0, top: 0, width: info.width, height: info.height };
+
+  const outPath = path.join(OUT_DIR, outName);
+  await sharp(data, { raw: { width: info.width, height: info.height, channels: 4 } })
+    .extract(box)
+    .extend({ top: 4, bottom: 4, left: 4, right: 4, background: { r: 0, g: 0, b: 0, alpha: 1 } })
+    .resize(targetSize, targetSize, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 1 } })
+    .removeAlpha()
+    .webp({ quality: 88 })
+    .toFile(outPath);
+  console.log(`[WEBP] ${outName} -> ${(fs.statSync(outPath).size / 1024).toFixed(1)} KB`);
+}
+
+/**
+ * Connected-component extractor for asymmetric sprite sheets (e.g. env_frames_lanterns_spritesheet.png).
+ */
+function findConnectedComponents(data, width, height, minArea = 6000) {
+  const total = width * height;
+  const visited = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  const regions = [];
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const startIdx = y * width + x;
+      if (visited[startIdx] || data[startIdx * 4 + 3] <= 24) continue;
+
+      let head = 0;
+      let tail = 0;
+      queue[tail++] = startIdx;
+      visited[startIdx] = 1;
+
+      let minX = x;
+      let maxX = x;
+      let minY = y;
+      let maxY = y;
+      let area = 0;
+
+      while (head < tail) {
+        const curr = queue[head++];
+        const cx = curr % width;
+        const cy = (curr - cx) / width;
+        area++;
+        if (cx < minX) minX = cx;
+        if (cx > maxX) maxX = cx;
+        if (cy < minY) minY = cy;
+        if (cy > maxY) maxY = cy;
+
+        const neighbors = [
+          cx > 0 ? curr - 1 : -1,
+          cx < width - 1 ? curr + 1 : -1,
+          cy > 0 ? curr - width : -1,
+          cy < height - 1 ? curr + width : -1,
+        ];
+        for (const n of neighbors) {
+          if (n >= 0 && !visited[n] && data[n * 4 + 3] > 24) {
+            visited[n] = 1;
+            queue[tail++] = n;
+          }
+        }
+      }
+
+      if (area >= minArea) {
+        regions.push({
+          left: minX,
+          top: minY,
+          width: maxX - minX + 1,
+          height: maxY - minY + 1,
+          area,
+        });
+      }
+    }
+  }
+  return regions;
 }
 
 async function main() {
@@ -603,6 +830,7 @@ async function main() {
     targetH: 512,
     blendPx: 24,
     trimHorizontalWhite: true,
+    cropRightPct: 0,
   });
 
   await processSeamlessVerticalTexture({
@@ -612,6 +840,8 @@ async function main() {
     targetH: 768,
     blendPx: 48,
     trimHorizontalWhite: false,
+    cropBottomPct: 0.09,
+    cropRightPct: 0.06,
   });
 
   // 5. skins_spritesheet.png (3x3) -> 9 192x192 square WebPs
@@ -804,6 +1034,343 @@ async function main() {
         chromaMode: 'green',
       });
     }
+  }
+
+  // 10. STAGE 2 ASSETS (All 19 newly generated sprite & biome sheets)
+  // 10A. coins_spritesheet.png (4x2, #FF00FF -> 96x96)
+  if (fs.existsSync(path.join(RAW_DIR, 'coins_spritesheet.png'))) {
+    const raw = await sharp(path.join(RAW_DIR, 'coins_spritesheet.png')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const coinMap = [
+      [0, 0, 'coin_spin_0.webp'],
+      [1, 0, 'coin_spin_1.webp'],
+      [2, 0, 'coin_spin_2.webp'],
+      [3, 0, 'coin_spin_3.webp'],
+      [0, 1, 'icon_coin_hero.webp'],
+      [1, 1, 'icon_coin_stack.webp'],
+      [2, 1, 'icon_shard_crystal.webp'],
+      [3, 1, 'icon_super_orb_token.webp'],
+    ];
+    for (const [col, row, outName] of coinMap) {
+      await processSheetCell({
+        sheetBuf: raw.data,
+        sheetW: raw.info.width,
+        sheetH: raw.info.height,
+        cols: 4,
+        rows: 2,
+        col,
+        row,
+        outName,
+        padding: 3,
+        targetW: 96,
+        targetH: 96,
+        squareCenterPad: true,
+        maskSheetCorner: true,
+        chromaMode: 'magenta',
+      });
+    }
+  }
+
+  // 10B. companions_spritesheet.png (2x2, #FF00FF -> 192x192)
+  if (fs.existsSync(path.join(RAW_DIR, 'companions_spritesheet.png'))) {
+    const raw = await sharp(path.join(RAW_DIR, 'companions_spritesheet.png')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const compMap = [
+      [0, 0, 'prop_drone_companion.webp'],
+      [1, 0, 'prop_turret_heavy.webp'],
+      [0, 1, 'vfx_overdrive_ring.webp'],
+      [1, 1, 'vfx_magnet_ring.webp'],
+    ];
+    for (const [col, row, outName] of compMap) {
+      await processSheetCell({
+        sheetBuf: raw.data,
+        sheetW: raw.info.width,
+        sheetH: raw.info.height,
+        cols: 2,
+        rows: 2,
+        col,
+        row,
+        outName,
+        padding: 4,
+        targetW: 192,
+        targetH: 192,
+        squareCenterPad: true,
+        maskSheetCorner: true,
+        chromaMode: 'magenta',
+      });
+    }
+  }
+
+  // 10C. overlay_cracks_spritesheet.png (3x1, #00FF00 flood-fill -> 160x160)
+  if (fs.existsSync(path.join(RAW_DIR, 'overlay_cracks_spritesheet.png'))) {
+    const raw = await sharp(path.join(RAW_DIR, 'overlay_cracks_spritesheet.png')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const cleaned = removeBottomRightWatermark(raw.data, raw.info.width, raw.info.height, 'chroma_green');
+    for (let col = 0; col < 3; col++) {
+      await processSheetCell({
+        sheetBuf: cleaned,
+        sheetW: raw.info.width,
+        sheetH: raw.info.height,
+        cols: 3,
+        rows: 1,
+        col,
+        row: 0,
+        outName: `crack_stage_${col + 1}.webp`,
+        padding: 4,
+        targetW: 160,
+        targetH: 160,
+        squareCenterPad: true,
+        maskSheetCorner: false,
+        chromaMode: 'green',
+      });
+    }
+  }
+
+  // 10D. vfx_chunks_sheet.png (3x2, #FF00FF -> 96x96)
+  if (fs.existsSync(path.join(RAW_DIR, 'vfx_chunks_sheet.png'))) {
+    const raw = await sharp(path.join(RAW_DIR, 'vfx_chunks_sheet.png')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const chunkMap = [
+      [0, 0, 'chunk_sandstone.webp'],
+      [1, 0, 'chunk_slate.webp'],
+      [2, 0, 'chunk_gold.webp'],
+      [0, 1, 'chunk_crystal.webp'],
+      [1, 1, 'chunk_ember.webp'],
+      [2, 1, 'chunk_tnt_plank.webp'],
+    ];
+    for (const [col, row, outName] of chunkMap) {
+      await processSheetCell({
+        sheetBuf: raw.data,
+        sheetW: raw.info.width,
+        sheetH: raw.info.height,
+        cols: 3,
+        rows: 2,
+        col,
+        row,
+        outName,
+        padding: 3,
+        targetW: 96,
+        targetH: 96,
+        squareCenterPad: true,
+        maskSheetCorner: true,
+        chromaMode: 'magenta',
+      });
+    }
+  }
+
+  // 10E. vfx_additive_sheet.png (3x2, #000000 black additive preserved -> 160x160)
+  if (fs.existsSync(path.join(RAW_DIR, 'vfx_additive_sheet.png'))) {
+    const raw = await sharp(path.join(RAW_DIR, 'vfx_additive_sheet.png')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const cleaned = removeBottomRightWatermark(raw.data, raw.info.width, raw.info.height, 'black');
+    const addMap = [
+      [0, 0, 'vfx_spark_star.webp'],
+      [1, 0, 'vfx_grind_spray.webp'],
+      [2, 0, 'vfx_tnt_fireball.webp'],
+      [0, 1, 'vfx_shockwave_ring.webp'],
+      [1, 1, 'vfx_cleave_arc.webp'],
+      [2, 1, 'vfx_lightning_bolt.webp'],
+    ];
+    for (const [col, row, outName] of addMap) {
+      await processAdditiveCell({
+        sheetBuf: cleaned,
+        sheetW: raw.info.width,
+        sheetH: raw.info.height,
+        cols: 3,
+        rows: 2,
+        col,
+        row,
+        outName,
+        targetSize: 160,
+      });
+    }
+  }
+
+  // 10F. ui_icons_v2_spritesheet.png (3x2, #00FF00 flood-fill -> 128x128)
+  if (fs.existsSync(path.join(RAW_DIR, 'ui_icons_v2_spritesheet.png'))) {
+    const raw = await sharp(path.join(RAW_DIR, 'ui_icons_v2_spritesheet.png')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const cleaned = removeBottomRightWatermark(raw.data, raw.info.width, raw.info.height, 'chroma_green');
+    const iconV2Map = [
+      [0, 0, 'icon_skill_magpulse.webp'],
+      [1, 0, 'icon_skill_overclock.webp'],
+      [2, 0, 'icon_leaderboard.webp'],
+      [0, 1, 'icon_perk_card.webp'],
+      [1, 1, 'icon_armory_skins.webp'],
+      [2, 1, 'icon_drone_badge.webp'],
+    ];
+    for (const [col, row, outName] of iconV2Map) {
+      await processSheetCell({
+        sheetBuf: cleaned,
+        sheetW: raw.info.width,
+        sheetH: raw.info.height,
+        cols: 3,
+        rows: 2,
+        col,
+        row,
+        outName,
+        padding: 4,
+        targetW: 128,
+        targetH: 128,
+        squareCenterPad: true,
+        maskSheetCorner: false,
+        chromaMode: 'green',
+      });
+    }
+  }
+
+  // 10G. ui_chrome_spritesheet.png (2x2, #00FF00 flood-fill -> 256x256, symmetrical mirror heal on Console Dock)
+  if (fs.existsSync(path.join(RAW_DIR, 'ui_chrome_spritesheet.png'))) {
+    const raw = await sharp(path.join(RAW_DIR, 'ui_chrome_spritesheet.png')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const chromeMap = [
+      [0, 0, 'ui_stat_plaque.webp', false],
+      [1, 0, 'ui_title_ribbon.webp', false],
+      [0, 1, 'ui_sunburst_crest.webp', false],
+      [1, 1, 'ui_console_dock.webp', true],
+    ];
+    for (const [col, row, outName, mirrorCorner] of chromeMap) {
+      await processSheetCell({
+        sheetBuf: raw.data,
+        sheetW: raw.info.width,
+        sheetH: raw.info.height,
+        cols: 2,
+        rows: 2,
+        col,
+        row,
+        outName,
+        padding: 4,
+        targetW: 256,
+        targetH: 256,
+        squareCenterPad: true,
+        mirrorBottomRightCorner: mirrorCorner,
+        maskSheetCorner: false,
+        chromaMode: 'green',
+      });
+    }
+  }
+
+  // 10H. env_frames_lanterns_spritesheet.png (Connected-component extraction -> 3 pillars 96x512 + 3 sconces 128x128)
+  const framesPath = path.join(RAW_DIR, 'env_frames_lanterns_spritesheet.png');
+  if (fs.existsSync(framesPath)) {
+    const raw = await sharp(framesPath).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const preCleaned = removeBottomRightWatermark(raw.data, raw.info.width, raw.info.height, 'chroma_green');
+    const keyed = chromaKeyGreenFloodFill(preCleaned, raw.info.width, raw.info.height);
+    const regions = findConnectedComponents(keyed, raw.info.width, raw.info.height, 8000);
+
+    const pillars = regions.filter((r) => r.height > raw.info.height * 0.55).sort((a, b) => a.left - b.left);
+    const sconces = regions.filter((r) => r.height <= raw.info.height * 0.55).sort((a, b) => a.top - b.top);
+
+    const pillarNames = ['env_beam_oak.webp', 'env_beam_steel.webp', 'env_beam_quantum.webp'];
+    for (let i = 0; i < Math.min(pillars.length, pillarNames.length); i++) {
+      const reg = pillars[i];
+      const insetY = Math.floor(reg.height * 0.08);
+      const { data: seg, info: segInfo } = await sharp(keyed, {
+        raw: { width: raw.info.width, height: raw.info.height, channels: 4 },
+      })
+        .extract({
+          left: reg.left,
+          top: reg.top + insetY,
+          width: reg.width,
+          height: Math.max(64, reg.height - insetY * 2),
+        })
+        .resize(96, 512 + 96, { fit: 'fill' })
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+
+      const out = Buffer.allocUnsafe(96 * 512 * 4);
+      seg.copy(out, 0, 0, 96 * 512 * 4);
+      const overlap = 96;
+      for (let y = 0; y < overlap; y++) {
+        const t = 0.5 - 0.5 * Math.cos((Math.PI * y) / overlap);
+        for (let x = 0; x < 96; x++) {
+          const dst = (y * 96 + x) * 4;
+          const tail = ((512 + y) * 96 + x) * 4;
+          for (let c = 0; c < 4; c++) {
+            out[dst + c] = Math.round(seg[tail + c] * (1 - t) + out[dst + c] * t);
+          }
+        }
+      }
+      const shifted = Buffer.allocUnsafe(out.length);
+      for (let y = 0; y < 512; y++) {
+        const sy = (y + 256) % 512;
+        out.copy(shifted, y * 96 * 4, sy * 96 * 4, (sy + 1) * 96 * 4);
+      }
+      const outPath = path.join(OUT_DIR, pillarNames[i]);
+      await sharp(shifted, { raw: { width: 96, height: 512, channels: 4 } }).webp(WEBP_OPTS).toFile(outPath);
+      console.log(`[WEBP] ${pillarNames[i]} -> ${(fs.statSync(outPath).size / 1024).toFixed(1)} KB`);
+    }
+
+    const sconceNames = ['prop_sconce_oil.webp', 'prop_sconce_crystal.webp', 'prop_sconce_plasma.webp'];
+    for (let i = 0; i < Math.min(sconces.length, sconceNames.length); i++) {
+      const reg = sconces[i];
+      const outPath = path.join(OUT_DIR, sconceNames[i]);
+      await sharp(keyed, { raw: { width: raw.info.width, height: raw.info.height, channels: 4 } })
+        .extract(reg)
+        .extend({ top: 4, bottom: 4, left: 4, right: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } })
+        .resize(128, 128, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+        .webp(WEBP_OPTS)
+        .toFile(outPath);
+      console.log(`[WEBP] ${sconceNames[i]} -> ${(fs.statSync(outPath).size / 1024).toFixed(1)} KB`);
+    }
+  }
+
+  // 10I. Dedicated Biome 2-6 Block Sheets (3x2 each -> 160x160)
+  const biomeSheets = [
+    { file: 'biome2_crystal_blocks.png', prefix: 'b2', chroma: 'magenta' },
+    { file: 'biome3_magma_blocks.png', prefix: 'b3', chroma: 'magenta' },
+    { file: 'biome4_subzero_blocks.png', prefix: 'b4', chroma: 'magenta' },
+    { file: 'biome5_cyber_blocks.png', prefix: 'b5', chroma: 'green' },
+    { file: 'biome6_quantum_blocks.png', prefix: 'b6', chroma: 'green' },
+  ];
+  const biomeCells = [
+    [0, 0, 'stone', false],
+    [1, 0, 'granite', false],
+    [2, 0, 'ore_primary', false],
+    [0, 1, 'ore_rare', false],
+    [1, 1, 'special', false],
+    [2, 1, 'boss_core', true],
+  ];
+  for (const sheet of biomeSheets) {
+    const p = path.join(RAW_DIR, sheet.file);
+    if (!fs.existsSync(p)) continue;
+    const raw = await sharp(p).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    for (const [col, row, suffix, isBoss] of biomeCells) {
+      await processSheetCell({
+        sheetBuf: raw.data,
+        sheetW: raw.info.width,
+        sheetH: raw.info.height,
+        cols: 3,
+        rows: 2,
+        col,
+        row,
+        outName: `${sheet.prefix}_${suffix}.webp`,
+        padding: 2,
+        targetW: 160,
+        targetH: 160,
+        squareCenterPad: false,
+        mirrorBottomRightCorner: isBoss,
+        maskSheetCorner: false,
+        chromaMode: sheet.chroma,
+      });
+    }
+  }
+
+  // 10J. Seamless Biome 1-6 Rock Flanks (512x768)
+  const flankJobs = [
+    { src: 'env_flank_quarry_v2.png', out: 'env_flank_b1.webp', cropTopPct: 0, cropBottomPct: 0.53, cropRightPct: 0.05 },
+    { src: 'env_flank_crystal.png', out: 'env_flank_b2.webp', cropTopPct: 0, cropBottomPct: 0.09, cropRightPct: 0.06 },
+    { src: 'env_flank_magma.png', out: 'env_flank_b3.webp', cropTopPct: 0, cropBottomPct: 0.09, cropRightPct: 0.06 },
+    { src: 'env_flank_subzero.png', out: 'env_flank_b4.webp', cropTopPct: 0, cropBottomPct: 0.09, cropRightPct: 0.06 },
+    { src: 'env_flank_cyber.png', out: 'env_flank_b5.webp', cropTopPct: 0, cropBottomPct: 0.09, cropRightPct: 0.06 },
+    { src: 'env_flank_quantum.png', out: 'env_flank_b6.webp', cropTopPct: 0, cropBottomPct: 0.09, cropRightPct: 0.06 },
+  ];
+  for (const fj of flankJobs) {
+    if (!fs.existsSync(path.join(RAW_DIR, fj.src))) continue;
+    await processSeamlessVerticalTexture({
+      srcName: fj.src,
+      outName: fj.out,
+      targetW: 512,
+      targetH: 768,
+      blendPx: 48,
+      trimHorizontalWhite: false,
+      cropTopPct: fj.cropTopPct,
+      cropBottomPct: fj.cropBottomPct,
+      cropRightPct: fj.cropRightPct,
+    });
   }
 
   console.log('Done processing all assets!');

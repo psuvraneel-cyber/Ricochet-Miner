@@ -8,7 +8,7 @@ import type { AimFeedback } from '../core/InputManager';
 import type { ViewportLayout } from '../core/ViewportManager';
 import { formatCompact } from '../utils/format';
 import { BiomeTheme } from '../world/BiomeTheme';
-import type { BlockEntity, CoinDrop, Orb } from '../world/Entities';
+import type { BlockEntity, CoinDrop, CompanionDroneState, Orb } from '../world/Entities';
 import type { FloatingTextPool } from './FloatingTextPool';
 import type { JuiceSystem } from './JuiceSystem';
 import type { ParticlePool } from './ParticlePool';
@@ -24,6 +24,13 @@ export interface RenderSceneState {
   loadedOrbRadius?: number;
   loadedOrbCount?: number;
   turretRecoil?: number;
+  heavyTurret?: boolean;
+  overclockTimer?: number;
+  magPulseShockwaves?: Array<{ x: number; y: number; radius: number; maxRadius: number; alpha: number }>;
+  lightningArcs?: Array<{ x1: number; y1: number; x2: number; y2: number; alpha: number }>;
+  drone?: CompanionDroneState | null;
+  activeWeakPointCoreIndex?: number | null;
+  bossPhase2?: boolean;
   trajectoryDots: Array<{ x: number; y: number }>;
   trajectoryImpact: { x: number; y: number } | null;
   trajectorySecondImpact?: { x: number; y: number } | null;
@@ -127,7 +134,15 @@ export class Renderer {
       const block = scene.entities[i];
       if (!block.alive) continue;
       if (block.y + block.height < minVisibleY || block.y > maxVisibleY) continue;
-      this.renderEntity(ctx, block, biome, scene.timeS, rawDt);
+      this.renderEntity(
+        ctx,
+        block,
+        biome,
+        scene.timeS,
+        rawDt,
+        scene.activeWeakPointCoreIndex ?? null,
+        Boolean(scene.bossPhase2)
+      );
     }
 
     // Pulsing aim target highlight on 1st & 2nd predicted block/TNT hits
@@ -164,6 +179,7 @@ export class Renderer {
       scene.skin,
       scene.loadedOrbRadius ?? 14,
       scene.loadedOrbCount ?? 1,
+      Boolean(scene.heavyTurret),
       scene.timeS
     );
 
@@ -171,12 +187,17 @@ export class Renderer {
       this.renderAimFeedback(ctx, scene.aimFeedback, scene.timeS);
     }
 
-    // Spinning 3D Metallic Coins + Magnet Trails
+    // Companion Auto-Drill Drone
+    if (scene.drone && scene.drone.active) {
+      this.renderDrone(ctx, scene.drone, scene.timeS);
+    }
+
+    // Spinning Metallic Coins (coin_spin_0..3.webp) + Magnet Trails
     for (let i = 0; i < scene.coins.length; i++) {
       const c = scene.coins[i];
       if (!c.alive) continue;
-      const spinPhase = scene.timeS * 8.5 + i * 1.17;
-      const spinX = Math.max(0.24, Math.abs(Math.cos(spinPhase)));
+      const frame = (Math.floor(scene.timeS * 10 + i * 1.7) % 4) as 0 | 1 | 2 | 3;
+      const coinSprite = this.atlas.getCoinSprite(frame);
 
       ctx.save();
       if (c.magnetized) {
@@ -191,37 +212,46 @@ export class Renderer {
         ctx.stroke();
       }
 
-      ctx.fillStyle = 'rgba(251, 191, 36, 0.25)';
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, 10.5, 0, Math.PI * 2);
-      ctx.fill();
+      if (coinSprite) {
+        ctx.drawImage(coinSprite, c.x - 11, c.y - 11, 22, 22);
+      } else {
+        const spinPhase = scene.timeS * 8.5 + i * 1.17;
+        const spinX = Math.max(0.24, Math.abs(Math.cos(spinPhase)));
+        ctx.fillStyle = 'rgba(251, 191, 36, 0.25)';
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 10.5, 0, Math.PI * 2);
+        ctx.fill();
 
-      ctx.translate(c.x, c.y);
-      ctx.scale(spinX, 1);
+        ctx.translate(c.x, c.y);
+        ctx.scale(spinX, 1);
 
-      ctx.fillStyle = '#f59e0b';
-      ctx.beginPath();
-      ctx.arc(0, 0, 7.2, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#181210';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      ctx.fillStyle = '#fde047';
-      ctx.beginPath();
-      ctx.arc(-0.5, -0.5, 4.6, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.fillStyle = '#fffbeb';
-      ctx.fillRect(-1.1, -3, 2.2, 6);
+        ctx.fillStyle = '#f59e0b';
+        ctx.beginPath();
+        ctx.arc(0, 0, 7.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#181210';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
       ctx.restore();
     }
 
-    // Spinning Sawblade Orbs (prop_sawblade.webp) & Comet Ribbon Trails
+    // Active Mag-Pulse Shockwave & Magnet Rings
+    if (scene.magPulseShockwaves && scene.magPulseShockwaves.length > 0) {
+      this.renderMagPulseShockwaves(ctx, scene.magPulseShockwaves);
+    }
+
+    // Chain Lightning Electric Arcs
+    if (scene.lightningArcs && scene.lightningArcs.length > 0) {
+      this.renderLightningArcs(ctx, scene.lightningArcs, scene.timeS);
+    }
+
+    // Spinning Sawblade Orbs (prop_sawblade.webp) & Overclock / Comet Trails
+    const overclockActive = (scene.overclockTimer ?? 0) > 0;
     for (let i = 0; i < scene.orbs.length; i++) {
       const orb = scene.orbs[i];
       if (!orb.alive) continue;
-      this.renderOrb(ctx, orb, scene.skin);
+      this.renderOrb(ctx, orb, scene.skin, overclockActive, scene.timeS);
     }
 
     // World Effects, Particles & Floating Text
@@ -448,10 +478,10 @@ export class Renderer {
       ctx.fillRect(PHYSICS_CONFIG.SHAFT_WIDTH, cameraY - 20, beamW, viewH + 40);
     }
 
-    // Wall Lanterns (prop_lantern.webp) centered strictly on timber support beams so they never overlap Col 0 or Col 8
+    // Wall Sconces centered strictly on pillar beams so they never overlap Col 0 or Col 8
     const step = PHYSICS_CONFIG.TILE_SIZE * 5;
     const startLanternY = Math.floor(cameraY / step) * step + 120;
-    const lanternTex = this.atlas.getPropLantern();
+    const lanternTex = this.atlas.getPropLantern(biome);
 
     for (let sy = startLanternY; sy < cameraY + viewH + step; sy += step) {
       const flicker = 0.85 + 0.15 * Math.sin(timeS * 11 + sy);
@@ -554,6 +584,7 @@ export class Renderer {
     skin: SkinSpec,
     loadedOrbRadius: number,
     loadedOrbCount: number,
+    heavyTurret: boolean,
     timeS: number
   ): void {
     const angle = aimAngleRad ?? Math.PI * 0.5;
@@ -620,7 +651,7 @@ export class Renderer {
       ctx.fill();
     }
 
-    const turretTex = this.atlas.getPropTurret();
+    const turretTex = this.atlas.getPropTurret(heavyTurret);
     ctx.translate(rx, pivotY);
     ctx.rotate(angle - Math.PI * 0.5);
 
@@ -766,7 +797,9 @@ export class Renderer {
     b: BlockEntity,
     biome: BiomeSpec,
     timeS: number,
-    rawDt: number
+    rawDt: number,
+    activeWeakPointCoreIndex: number | null = null,
+    bossPhase2: boolean = false
   ): void {
     const targetX = b.x;
     const visX = b.renderX ?? targetX;
@@ -776,6 +809,72 @@ export class Renderer {
     const drawX = nextVisX;
     const cx = drawX + b.width * 0.5;
     const cy = b.y + b.height * 0.5;
+
+    if (
+      b.kind === 'pickup_split' ||
+      b.kind === 'pickup_magnet' ||
+      b.kind === 'pickup_overclock'
+    ) {
+      const bob = Math.sin(timeS * 4.5 + b.id) * 4;
+      const sprite = this.atlas.getBlockSprite(b.kind, biome, b.col, b.row);
+      const glowColor =
+        b.kind === 'pickup_split'
+          ? 'rgba(34, 211, 238, 0.55)'
+          : b.kind === 'pickup_magnet'
+          ? 'rgba(250, 204, 21, 0.55)'
+          : 'rgba(249, 115, 22, 0.58)';
+      ctx.save();
+      ctx.translate(cx, cy + bob);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const aura = ctx.createRadialGradient(0, 0, 2, 0, 0, b.radius * 1.45);
+      aura.addColorStop(0, glowColor);
+      aura.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = aura;
+      ctx.beginPath();
+      ctx.arc(0, 0, b.radius * 1.45, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      if (sprite) {
+        const s = b.radius * 2.3;
+        ctx.drawImage(sprite, -s * 0.5, -s * 0.5, s, s);
+      } else {
+        ctx.fillStyle = '#38bdf8';
+        ctx.beginPath();
+        ctx.arc(0, 0, b.radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+      return;
+    }
+
+    if (b.kind === 'boss_shard') {
+      const shardSprite = this.atlas.getBlockSprite('boss_shard', biome, b.col, b.row);
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(timeS * 5 + b.id);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const aura = ctx.createRadialGradient(0, 0, 2, 0, 0, b.radius * 1.4);
+      aura.addColorStop(0, 'rgba(244, 63, 94, 0.65)');
+      aura.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = aura;
+      ctx.beginPath();
+      ctx.arc(0, 0, b.radius * 1.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      if (shardSprite) {
+        const s = b.radius * 2.1;
+        ctx.drawImage(shardSprite, -s * 0.5, -s * 0.5, s, s);
+      } else {
+        ctx.fillStyle = '#f43f5e';
+        ctx.beginPath();
+        ctx.arc(0, 0, b.radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+      return;
+    }
 
     if (b.kind === 'portal_entry' || b.kind === 'portal_exit') {
       ctx.save();
@@ -884,42 +983,83 @@ export class Renderer {
       ctx.fill();
       ctx.restore();
     } else if (b.kind === 'boss_core') {
+      const isWeakPoint =
+        activeWeakPointCoreIndex !== null && b.bossCoreIndex === activeWeakPointCoreIndex;
       ctx.save();
-      ctx.strokeStyle = 'rgba(253, 186, 116, 0.85)';
-      ctx.lineWidth = 2;
+      ctx.strokeStyle = isWeakPoint
+        ? '#fde047'
+        : bossPhase2
+        ? 'rgba(244, 63, 94, 0.92)'
+        : 'rgba(253, 186, 116, 0.85)';
+      ctx.lineWidth = isWeakPoint ? 3 : 2;
       ctx.beginPath();
       ctx.arc(cx, cy, b.width * 0.34, 0, Math.PI * 2);
       ctx.stroke();
+
+      if (isWeakPoint) {
+        const rot = timeS * 2.8;
+        ctx.translate(cx, cy);
+        ctx.rotate(rot);
+        ctx.strokeStyle = '#fde047';
+        ctx.lineWidth = 2.4;
+        const r = b.width * 0.48;
+        for (let k = 0; k < 4; k++) {
+          const a = (Math.PI * 0.5) * k;
+          ctx.beginPath();
+          ctx.arc(0, 0, r, a - 0.32, a + 0.32);
+          ctx.stroke();
+        }
+        ctx.rotate(-rot);
+        ctx.font = '800 10px "Lilita One", system-ui, sans-serif';
+        ctx.fillStyle = '#fde047';
+        ctx.strokeStyle = '#181210';
+        ctx.lineWidth = 3;
+        ctx.textAlign = 'center';
+        ctx.strokeText('2.0x CRIT', 0, -b.height * 0.56);
+        ctx.fillText('2.0x CRIT', 0, -b.height * 0.56);
+      }
       ctx.restore();
     }
 
-    // Hit flash overlay
+    // Hit flash or Burn DoT tint overlay
     if (b.hitFlashTimer > 0) {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
       ctx.fillRect(drawX + 2, b.y + 2, b.width - 4, b.height - 4);
+    } else if ((b.burnTimer ?? 0) > 0) {
+      ctx.fillStyle = 'rgba(249, 115, 22, 0.25)';
+      ctx.fillRect(drawX + 2, b.y + 2, b.width - 4, b.height - 4);
     }
 
-    // Progressive jagged organic fissure cracks + SINGLE bold outlined centered HP numeral
+    // Progressive Stage 2 crack_stage_1/2/3.webp overlay (with vector fallback)
     if (Number.isFinite(b.hp) && b.maxHp > 0) {
       const ratio = b.hp / b.maxHp;
-      if (ratio < 1) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(drawX + 2, b.y + 2, b.width - 4, b.height - 4);
-        ctx.clip();
+      if (ratio < 0.78) {
+        const stage: 1 | 2 | 3 = ratio < 0.28 ? 3 : ratio < 0.52 ? 2 : 1;
+        const crackSprite = this.atlas.getCrackSprite(stage);
+        if (crackSprite) {
+          ctx.save();
+          ctx.globalAlpha = 0.92;
+          ctx.drawImage(crackSprite, drawX, b.y, b.width, b.height);
+          ctx.restore();
+        } else {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(drawX + 2, b.y + 2, b.width - 4, b.height - 4);
+          ctx.clip();
 
-        ctx.strokeStyle = 'rgba(24, 18, 16, 0.78)';
-        ctx.lineWidth = 3.2;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        this.traceJaggedCracks(ctx, drawX, b.y, b.width, b.height, cx, cy, ratio, b.id);
-        ctx.stroke();
+          ctx.strokeStyle = 'rgba(24, 18, 16, 0.78)';
+          ctx.lineWidth = 3.2;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          this.traceJaggedCracks(ctx, drawX, b.y, b.width, b.height, cx, cy, ratio, b.id);
+          ctx.stroke();
 
-        ctx.strokeStyle = 'rgba(255, 224, 102, 0.92)';
-        ctx.lineWidth = 1.6;
-        this.traceJaggedCracks(ctx, drawX, b.y, b.width, b.height, cx, cy, ratio, b.id);
-        ctx.stroke();
-        ctx.restore();
+          ctx.strokeStyle = 'rgba(255, 224, 102, 0.92)';
+          ctx.lineWidth = 1.6;
+          this.traceJaggedCracks(ctx, drawX, b.y, b.width, b.height, cx, cy, ratio, b.id);
+          ctx.stroke();
+          ctx.restore();
+        }
       }
 
       if (b.kind !== 'tnt' && (b.hp < b.maxHp || b.hp >= 10)) {
@@ -974,12 +1114,117 @@ export class Renderer {
     }
   }
 
-  private renderOrb(ctx: CanvasRenderingContext2D, orb: Orb, skin: SkinSpec): void {
+  private renderDrone(ctx: CanvasRenderingContext2D, drone: CompanionDroneState, timeS: number): void {
+    const dy = drone.y + Math.sin(drone.bobPhase) * 5;
+    if (drone.beamTimer > 0 && drone.targetX !== null && drone.targetY !== null) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = 'rgba(34, 211, 238, 0.85)';
+      ctx.lineWidth = 5;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(drone.x, dy);
+      ctx.lineTo(drone.targetX, drone.targetY);
+      ctx.stroke();
+      ctx.strokeStyle = '#fef08a';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    const droneTex = this.atlas.getPropDrone();
+    ctx.save();
+    ctx.translate(drone.x, dy);
+    ctx.rotate(Math.sin(timeS * 3) * 0.08);
+    if (droneTex) {
+      ctx.drawImage(droneTex, -24, -24, 48, 48);
+    } else {
+      ctx.fillStyle = '#38bdf8';
+      ctx.beginPath();
+      ctx.arc(0, 0, 14, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  private renderMagPulseShockwaves(
+    ctx: CanvasRenderingContext2D,
+    waves: Array<{ x: number; y: number; radius: number; maxRadius: number; alpha: number }>
+  ): void {
+    const magnetRing = this.atlas.getVfxRing('magnet');
+    const shockwave = this.atlas.getAdditiveVfxSprite('shockwave_ring');
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const w of waves) {
+      ctx.globalAlpha = Math.max(0, Math.min(1, w.alpha));
+      if (magnetRing) {
+        const size = w.radius * 2;
+        ctx.drawImage(magnetRing, w.x - w.radius, w.y - w.radius, size, size);
+      }
+      if (shockwave) {
+        const size = w.radius * 2.15;
+        ctx.drawImage(shockwave, w.x - size * 0.5, w.y - size * 0.5, size, size);
+      }
+      if (!magnetRing && !shockwave) {
+        ctx.strokeStyle = '#22d3ee';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(w.x, w.y, w.radius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  private renderLightningArcs(
+    ctx: CanvasRenderingContext2D,
+    arcs: Array<{ x1: number; y1: number; x2: number; y2: number; alpha: number }>,
+    timeS: number
+  ): void {
+    const boltImg = this.atlas.getAdditiveVfxSprite('lightning_bolt');
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const a of arcs) {
+      ctx.globalAlpha = Math.max(0, Math.min(1, a.alpha));
+      const dx = a.x2 - a.x1;
+      const dy = a.y2 - a.y1;
+      const len = Math.hypot(dx, dy);
+      if (len < 2) continue;
+      if (boltImg) {
+        ctx.save();
+        ctx.translate(a.x1, a.y1);
+        ctx.rotate(Math.atan2(dy, dx));
+        ctx.drawImage(boltImg, 0, -18, len, 36);
+        ctx.restore();
+      } else {
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(a.x1, a.y1);
+        ctx.lineTo((a.x1 + a.x2) * 0.5 + Math.sin(timeS * 40) * 8, (a.y1 + a.y2) * 0.5);
+        ctx.lineTo(a.x2, a.y2);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  private renderOrb(
+    ctx: CanvasRenderingContext2D,
+    orb: Orb,
+    skin: SkinSpec,
+    overclockActive: boolean = false,
+    timeS: number = 0
+  ): void {
     const lowBounces = orb.bouncesLeft <= 2 || orb.overheatDraining;
-    const trailColor = lowBounces ? '#f59e0b' : orb.isOverdrive ? '#fde047' : skin.trailColor;
+    const trailColor = lowBounces
+      ? '#f59e0b'
+      : overclockActive || orb.isOverdrive
+      ? '#22d3ee'
+      : skin.trailColor;
     const comboScale = 1 + Math.min(0.4, orb.comboCount * 0.025);
 
-    // Luminous gold-orange curved comet ribbon trail
+    // Luminous gold-orange / overclocked cyan curved comet ribbon trail
     if (orb.trail.length > 1) {
       ctx.save();
       for (let i = 1; i < orb.trail.length; i++) {
@@ -998,10 +1243,32 @@ export class Renderer {
       ctx.restore();
     }
 
+    // Overclock spinning aura + cleave arc around live blades
+    if (overclockActive || orb.isOverdrive) {
+      const overdriveRing = this.atlas.getVfxRing('overdrive');
+      const cleaveArc = this.atlas.getAdditiveVfxSprite('cleave_arc');
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.translate(orb.x, orb.y);
+      ctx.rotate(timeS * 7);
+      if (overdriveRing) {
+        const s = orb.radius * 3.5;
+        ctx.globalAlpha = 0.8;
+        ctx.drawImage(overdriveRing, -s * 0.5, -s * 0.5, s, s);
+      }
+      if (cleaveArc) {
+        const s = orb.radius * 3.1;
+        ctx.globalAlpha = 0.75;
+        ctx.rotate(-timeS * 12);
+        ctx.drawImage(cleaveArc, -s * 0.5, -s * 0.5, s, s);
+      }
+      ctx.restore();
+    }
+
     // Bounce energy perimeter arc
     const bounceRatio = Math.max(0, Math.min(1, orb.bouncesLeft / Math.max(1, orb.maxBounces)));
     ctx.save();
-    ctx.strokeStyle = lowBounces ? '#f59e0b' : '#ffe066';
+    ctx.strokeStyle = lowBounces ? '#f59e0b' : overclockActive ? '#38bdf8' : '#ffe066';
     ctx.lineWidth = 2.5;
     ctx.beginPath();
     ctx.arc(orb.x, orb.y, orb.radius + 5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * bounceRatio);
