@@ -497,7 +497,8 @@ export class MusicEngine {
         }
       })
     );
-    const resolved = this.resolveBufferForBiome(this.activeBiomeIndex);
+    this.activeBiomeIndex = this.pendingBiomeIndex;
+    const resolved = this.resolveBufferForBiome(this.pendingBiomeIndex);
     if (resolved && !this.customBuffer) {
       this.setCustomTrackBuffer(resolved.buffer, resolved.key);
     }
@@ -595,6 +596,18 @@ export class MusicEngine {
 
   getActiveIntensity(): MusicIntensity {
     return this.activeIntensity;
+  }
+
+  getLoadedTrackCount(): number {
+    return this.trackBuffers.size;
+  }
+
+  getActiveTrackKey(): string {
+    return this.activeTrackKey;
+  }
+
+  isUsingCustomTrack(): boolean {
+    return this.customDeckActive && this.customBuffer !== null && this.schedulerId === null;
   }
 
   isRunning(): boolean {

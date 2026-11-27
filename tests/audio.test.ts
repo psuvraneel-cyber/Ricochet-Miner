@@ -116,6 +116,7 @@ class MockAudioContext {
   state: AudioContextState = 'running';
   destination = new MockAudioNode();
   oscillatorCount = 0;
+  bufferSourceCount = 0;
   compressorCount = 0;
   pannerCount = 0;
   suspendCount = 0;
@@ -152,7 +153,12 @@ class MockAudioContext {
   }
 
   createBufferSource(): AudioBufferSourceNode {
+    this.bufferSourceCount++;
     return new MockBufferSourceNode() as unknown as AudioBufferSourceNode;
+  }
+
+  async decodeAudioData(_arr: ArrayBuffer): Promise<AudioBuffer> {
+    return this.createBuffer(1, 22050, 44100);
   }
 
   createBuffer(_channels: number, length: number, sampleRate: number): AudioBuffer {
@@ -181,6 +187,7 @@ describe('Adaptive Music, Audio Mastering & Compliance', () => {
   let mockCtxInstance: MockAudioContext | null = null;
   let windowListeners: Map<string, Set<EventListenerOrEventListenerObject>>;
   const originalWindow = (globalThis as Record<string, unknown>).window;
+  const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -212,6 +219,7 @@ describe('Adaptive Music, Audio Mastering & Compliance', () => {
   afterEach(() => {
     vi.useRealTimers();
     (globalThis as Record<string, unknown>).window = originalWindow;
+    globalThis.fetch = originalFetch;
   });
 
   it('unlocks clean master limiter + SFX + Music routing and fades music in', () => {
@@ -560,5 +568,70 @@ describe('Adaptive Music, Audio Mastering & Compliance', () => {
 
     expect(mockCtxInstance!.oscillatorCount).toBeGreaterThan(oscBefore);
     expect(audio.getActiveVoiceCount()).toBeLessThanOrEqual(24);
+  });
+
+  it('decodes all studio SFX & 4-biome BGM stems, routes Track B materials cleanly, and switches biome MP3 tracks', async () => {
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      arrayBuffer: async () => new ArrayBuffer(16),
+    })) as unknown as typeof fetch;
+
+    const audio = new AudioEngine(false, false, false, 'high');
+    audio.unlock();
+
+    // Flush all async fetch + decodeAudioData + Promise.all microtasks
+    for (let i = 0; i < 8; i++) {
+      await Promise.resolve();
+    }
+
+    const me = audio.getMusicEngine();
+    expect(audio.getLoadedSampleCount()).toBeGreaterThanOrEqual(40);
+    expect(me.getLoadedTrackCount()).toBe(4);
+    expect(me.isRunning()).toBe(true);
+    expect(me.isUsingCustomTrack()).toBe(true);
+
+    // Biome -> studio MP3 resolution across all 6 biomes
+    expect(me.getActiveTrackKey()).toBe('bgm_surface');
+    me.setBiome(1);
+    expect(me.getActiveTrackKey()).toBe('bgm_surface');
+    me.setBiome(2);
+    expect(me.getActiveTrackKey()).toBe('bgm_deep');
+    me.setBiome(3);
+    expect(me.getActiveTrackKey()).toBe('bgm_deep');
+    me.setBiome(4);
+    expect(me.getActiveTrackKey()).toBe('bgm_biome_5');
+    me.setBiome(5);
+    expect(me.getActiveTrackKey()).toBe('bgm_biome_6');
+
+    let fakePerfNow = 10_000;
+    const perfSpy = vi.spyOn(performance, 'now').mockImplementation(() => fakePerfNow);
+
+    // Studio SFX should bypass procedural sine fallbacks (zero new oscillators on sample-backed cues)
+    const oscStart = mockCtxInstance!.oscillatorCount;
+    const srcStart = mockCtxInstance!.bufferSourceCount;
+
+    audio.playHit(0, false, 'vault', 900, 200);
+    audio.playHit(1, false, 'splitter', 900, 260);
+    audio.playCrunch('frost', 180);
+    fakePerfNow += 50;
+    audio.playCrunch('crystal', 220);
+    fakePerfNow += 50;
+    audio.playCrunch('splitter', 280);
+    audio.playCrunch('boss_core', 270);
+    audio.playPassiveCue('burn', 210);
+    audio.playPassiveCue('acid', 240);
+    audio.playUpgrade();
+    audio.playPerkOpen(20);
+    audio.playPerkSelect();
+    audio.playFanfare();
+    audio.playVictoryFanfare();
+    audio.playModalOpen();
+    audio.playModalClose();
+    audio.playError();
+    audio.playElevator();
+
+    perfSpy.mockRestore();
+    expect(mockCtxInstance!.bufferSourceCount).toBe(srcStart + 17);
+    expect(mockCtxInstance!.oscillatorCount).toBe(oscStart);
   });
 });

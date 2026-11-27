@@ -407,6 +407,7 @@ export class AudioEngine {
       worldX?: number;
       destNode?: AudioNode;
       priority?: VoicePriority;
+      delaySec?: number;
     } = {}
   ): boolean {
     if (!this.ctx || !this.sfxGain) return false;
@@ -419,21 +420,21 @@ export class AudioEngine {
     const ctx = this.ctx;
     const ownDest = !opts.destNode;
     const dest = opts.destNode ?? this.createPannedDest(ctx, this.sfxGain, opts.worldX);
-    const now = ctx.currentTime;
+    const startAt = ctx.currentTime + Math.max(0, opts.delaySec ?? 0);
     const src = ctx.createBufferSource();
     src.buffer = buf;
     const baseRate = opts.rate ?? 1;
     const spread = opts.pitchSpread ?? 0.05;
     const rate = Math.max(0.5, Math.min(2.2, baseRate * this.pitchJitter(spread)));
     if (src.playbackRate) {
-      src.playbackRate.setValueAtTime(rate, now);
+      src.playbackRate.setValueAtTime(rate, startAt);
     }
 
     const g = ctx.createGain();
-    g.gain.setValueAtTime(opts.volume ?? 0.85, now);
+    g.gain.setValueAtTime(opts.volume ?? 0.85, startAt);
     src.connect(g).connect(dest);
     this.registerVoice(ctx, src, g, ownDest && dest !== this.sfxGain ? [dest] : [], priority);
-    src.start(now);
+    src.start(startAt);
     return true;
   }
 
@@ -995,8 +996,10 @@ export class AudioEngine {
 
     // Priority-tiered throttling so strata spam never swallows Vault / Boss Core / TNT hits
     const isPriority = mat === 'vault' || mat === 'boss_core' || mat === 'tnt';
-    const isMetal = mat === 'granite' || mat === 'boss_armor' || mat === 'boss_shard';
-    const isCrystal = mat === 'frost' || mat === 'crystal' || mat === 'ore';
+    const isMetal =
+      mat === 'granite' || mat === 'boss_armor' || mat === 'boss_shard' || mat === 'laser';
+    const isCrystal =
+      mat === 'frost' || mat === 'crystal' || mat === 'ore' || mat === 'splitter';
     const throttleKey = isPriority
       ? 'hit_priority'
       : isMetal
@@ -1015,11 +1018,13 @@ export class AudioEngine {
     const comboRate = 1 + (pentatonicRate(pentIdx) - 1) * 0.32;
 
     const sampleKey =
-      mat === 'boss_armor' || mat === 'granite' || mat === 'boss_shard'
+      mat === 'boss_armor' || mat === 'granite' || mat === 'boss_shard' || mat === 'laser'
         ? 'sfx_hit_granite'
-        : mat === 'frost'
+        : mat === 'frost' || mat === 'crystal' || mat === 'splitter'
         ? 'sfx_hit_frost'
-        : mat === 'ore' || mat === 'vault' || mat === 'crystal'
+        : mat === 'vault' || mat === 'tnt'
+        ? 'sfx_hit_wood'
+        : mat === 'ore'
         ? 'sfx_hit_ore'
         : 'sfx_hit_stone';
 
@@ -1109,7 +1114,33 @@ export class AudioEngine {
     const dest = this.createPannedDest(ctx, out, worldX);
     const pri: VoicePriority = isPriority ? 3 : 1;
 
-    if (
+    if (mat === 'boss_core') {
+      if (
+        this.playSample('sfx_boss_shatter', {
+          volume: 0.9,
+          rate: 1.0,
+          pitchSpread: 0.03,
+          worldX,
+          destNode: dest,
+          priority: pri,
+        })
+      ) {
+        return;
+      }
+    } else if (mat === 'frost' || mat === 'crystal' || mat === 'splitter') {
+      if (
+        this.playSample('sfx_break_crystal', {
+          volume: 0.72,
+          rate: mat === 'frost' ? 1.06 : 1.0,
+          pitchSpread: 0.05,
+          worldX,
+          destNode: dest,
+          priority: pri,
+        })
+      ) {
+        return;
+      }
+    } else if (
       this.playSample('sfx_break_rock', {
         volume: 0.68,
         rate,
@@ -1119,15 +1150,7 @@ export class AudioEngine {
         priority: pri,
       })
     ) {
-      if (mat === 'frost') {
-        this.playSample('sfx_hit_frost', {
-          volume: 0.48,
-          rate: 1.15,
-          worldX,
-          destNode: dest,
-          priority: pri,
-        });
-      } else if (mat === 'ore') {
+      if (mat === 'ore') {
         this.playSample('sfx_hit_ore', {
           volume: 0.42,
           rate: 1.08,
@@ -1499,6 +1522,30 @@ export class AudioEngine {
       ) {
         return;
       }
+    } else if (passive === 'burn') {
+      if (
+        this.playSample('sfx_burn', {
+          volume: 0.42,
+          pitchSpread: 0.06,
+          worldX,
+          destNode: dest,
+          priority: 0,
+        })
+      ) {
+        return;
+      }
+    } else if (passive === 'acid') {
+      if (
+        this.playSample('sfx_acid', {
+          volume: 0.44,
+          pitchSpread: 0.06,
+          worldX,
+          destNode: dest,
+          priority: 0,
+        })
+      ) {
+        return;
+      }
     }
 
     if ((passive === 'burn' || passive === 'acid') && this.noiseBuffer) {
@@ -1623,6 +1670,16 @@ export class AudioEngine {
   playPerkOpen(delayMs: number = 0): void {
     const s = this.ensureSfxContext();
     if (!s) return;
+    if (
+      this.playSample('sfx_perk_open', {
+        volume: 0.68,
+        pitchSpread: 0.02,
+        priority: 2,
+        delaySec: Math.max(0, delayMs) / 1000,
+      })
+    ) {
+      return;
+    }
     const { ctx, out } = s;
     const startAt = ctx.currentTime + Math.max(0, delayMs) / 1000;
     [440, 554.37, 659.25, 880].forEach((freq, i) => {
@@ -1687,7 +1744,7 @@ export class AudioEngine {
   playUpgrade(): void {
     const s = this.ensureSfxContext();
     if (!s) return;
-    if (this.playSample('sfx_pickup', { volume: 0.56, rate: 1.06, pitchSpread: 0.02, priority: 2 })) {
+    if (this.playSample('sfx_upgrade', { volume: 0.68, rate: 1.0, pitchSpread: 0.03, priority: 2 })) {
       return;
     }
     const { ctx, out } = s;
@@ -1711,9 +1768,12 @@ export class AudioEngine {
   playFanfare(): void {
     const s = this.ensureSfxContext();
     if (!s) return;
+    this.duck(550, 0.45);
+    if (this.playSample('sfx_fanfare', { volume: 0.78, pitchSpread: 0.02, priority: 3 })) {
+      return;
+    }
     const { ctx, out } = s;
     const now = ctx.currentTime;
-    this.duck(550, 0.45);
     const chord = [523.25, 659.25, 783.99, 1046.5, 1318.51];
     chord.forEach((freq, idx) => {
       const t = now + idx * 0.06;
@@ -1733,9 +1793,12 @@ export class AudioEngine {
   playVictoryFanfare(): void {
     const s = this.ensureSfxContext();
     if (!s) return;
+    this.duck(1100, 0.45);
+    if (this.playSample('sfx_victory', { volume: 0.85, pitchSpread: 0.01, priority: 3 })) {
+      return;
+    }
     const { ctx, out } = s;
     const now = ctx.currentTime;
-    this.duck(1100, 0.45);
     const brassNotes = [392.0, 523.25, 659.25, 783.99];
     brassNotes.forEach((freq, idx) => {
       const t = now + idx * 0.11;
@@ -1810,6 +1873,9 @@ export class AudioEngine {
   playModalOpen(): void {
     const s = this.ensureSfxContext();
     if (!s || !this.playSoundThrottled('modalOpen', 60)) return;
+    if (this.playSample('sfx_ui_open', { volume: 0.52, rate: 1.04, pitchSpread: 0.02, priority: 1 })) {
+      return;
+    }
     const { ctx, out } = s;
     const now = ctx.currentTime;
     const osc = ctx.createOscillator();
@@ -1828,6 +1894,9 @@ export class AudioEngine {
   playModalClose(): void {
     const s = this.ensureSfxContext();
     if (!s || !this.playSoundThrottled('modalClose', 60)) return;
+    if (this.playSample('sfx_ui_open', { volume: 0.45, rate: 0.82, pitchSpread: 0.02, priority: 1 })) {
+      return;
+    }
     const { ctx, out } = s;
     const now = ctx.currentTime;
     const osc = ctx.createOscillator();
@@ -1846,6 +1915,9 @@ export class AudioEngine {
   playError(): void {
     const s = this.ensureSfxContext();
     if (!s || !this.playSoundThrottled('uiError', 100)) return;
+    if (this.playSample('sfx_ui_error', { volume: 0.58, pitchSpread: 0.03, priority: 1 })) {
+      return;
+    }
     const { ctx, out } = s;
     const now = ctx.currentTime;
     [155, 115].forEach((freq, idx) => {
@@ -1869,6 +1941,9 @@ export class AudioEngine {
   playElevator(): void {
     const s = this.ensureSfxContext();
     if (!s || !this.playSoundThrottled('elevator', 180)) return;
+    if (this.playSample('sfx_elevator', { volume: 0.74, pitchSpread: 0.03, priority: 2 })) {
+      return;
+    }
     const { ctx, out } = s;
     const now = ctx.currentTime;
     const clunk = ctx.createOscillator();
