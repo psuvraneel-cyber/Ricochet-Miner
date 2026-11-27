@@ -634,4 +634,26 @@ describe('Adaptive Music, Audio Mastering & Compliance', () => {
     expect(mockCtxInstance!.bufferSourceCount).toBe(srcStart + 17);
     expect(mockCtxInstance!.oscillatorCount).toBe(oscStart);
   });
+
+  it('allocates zero new StereoPannerNodes during chaotic SFX playback', () => {
+    const audio = new AudioEngine(false, false, false, 'high');
+    audio.unlock();
+    const pannersAfterInit = mockCtxInstance!.pannerCount;
+
+    let fakePerfNow = 20_000;
+    const perfSpy = vi.spyOn(performance, 'now').mockImplementation(() => fakePerfNow);
+
+    for (let i = 0; i < 60; i++) {
+      fakePerfNow += 60;
+      audio.playWallHit(900, 10 + (i % 500));
+      audio.playHit(i, i % 3 === 0, 'ore', 950, 40 + (i % 460));
+      audio.playCrunch('granite', 60 + (i % 420));
+      audio.playCoin(80 + (i % 380));
+      audio.playBumper(i, 200);
+      audio.playPassiveCue('burn', 150);
+    }
+
+    perfSpy.mockRestore();
+    expect(mockCtxInstance!.pannerCount).toBe(pannersAfterInit);
+  });
 });

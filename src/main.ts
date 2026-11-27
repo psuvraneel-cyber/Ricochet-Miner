@@ -280,18 +280,17 @@ class RicochetMinerApp {
 
     this.stateMachine.transition('AIMING');
     this.titleOverlay.hideImmediate();
-    this.titleOverlay.showFloatingIntroBanner(this.renderer.getLogoEmblemUrl());
     this.ftue.setAimMode(this.save.settings.aimMode);
     this.ftue.updateLayout(this.viewport.getLayout());
     this.ftue.setVisible(!this.save.ftueDone);
     this.hasStartedGameplayOnce = true;
     PlatformSDK.loadingStop();
-    PlatformSDK.gameplayStart();
     this.loop.start();
 
-    // Offline Idle Drill check
+    // Offline Idle Drill check (defer gameplayStart until modal is dismissed if shown)
     const offlineCoins = this.retention.calculateOfflineEarnings(this.save, nowMs);
     if (offlineCoins > 0) {
+      this.stateMachine.transition('SHOP');
       this.retentionModals.showOfflineModal(offlineCoins, async (doubled) => {
         this.audio.unlock();
         let payout = offlineCoins;
@@ -307,7 +306,10 @@ class RicochetMinerApp {
         this.save.coins += payout;
         this.save.totalCoinsEarned += payout;
         this.persistSave();
+        this.resumeToAiming();
       });
+    } else {
+      PlatformSDK.gameplayStart();
     }
   }
 
@@ -469,7 +471,7 @@ class RicochetMinerApp {
           this.monetization.markOverdriveOffered(this.save.runsCompleted);
           this.save.overdrivePasses += 1;
           this.persistSave();
-          this.hud.showToast('Super-Orb Armed!');
+          this.hud.showToast(i18n.t('super_orb_armed'));
         } else {
           this.showAdFailureToast(res.reason);
         }
@@ -1793,7 +1795,11 @@ class RicochetMinerApp {
     const bossText =
       selectedBiome.index >= ASCENSION_CONFIG.FINAL_BIOME_INDEX
         ? `${Math.floor(currentDepth)}m / ${ASCENSION_CONFIG.FINAL_GATE_DEPTH_M}m (${i18n.t('boss_gate')})`
-        : `${Math.floor(currentDepth)}m / ${Math.floor(bossEnd)}m to Biome ${nextBiomeNum} Boss`;
+        : i18n
+            .t('boss_progress_fmt')
+            .replace('{cur}', String(Math.floor(currentDepth)))
+            .replace('{target}', String(Math.floor(bossEnd)))
+            .replace('{n}', String(nextBiomeNum));
 
     // Check if current biome's Bedrock Boss Gate is visible or damaged to display active Boss HP bar
     const viewHeightWorld = this.viewport.getLayout().cssHeight / this.viewport.getLayout().scale;

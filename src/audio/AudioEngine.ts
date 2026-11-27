@@ -72,6 +72,7 @@ export class AudioEngine {
   private sfxGain: GainNode | null = null;
   private sfxBusOut: AudioNode | null = null;
   private sfxCompressor: DynamicsCompressorNode | null = null;
+  private sfxPanBuckets: StereoPannerNode[] = [];
   private musicDuckGain: GainNode | null = null;
   private musicGain: GainNode | null = null;
   private musicCompressor: DynamicsCompressorNode | null = null;
@@ -255,7 +256,7 @@ export class AudioEngine {
       }
       this.masterGain = masterGain;
 
-      // 1. SFX bus
+      // 1. SFX bus + 7 pre-allocated static stereo panner buckets (zero per-hit StereoPannerNode allocation)
       const sfxGain = ctx.createGain();
       sfxGain.gain.setValueAtTime(
         this.isMasterAllowed() && !this.sfxMuted ? SFX_DEFAULT_GAIN : 0,
@@ -263,6 +264,16 @@ export class AudioEngine {
       );
       this.sfxGain = sfxGain;
       this.sfxBusOut = sfxGain;
+      this.sfxPanBuckets = [];
+      if (typeof ctx.createStereoPanner === 'function') {
+        const panValues = [-0.42, -0.28, -0.14, 0, 0.14, 0.28, 0.42];
+        for (const pv of panValues) {
+          const p = ctx.createStereoPanner();
+          p.pan.setValueAtTime(pv, ctx.currentTime);
+          p.connect(sfxGain);
+          this.sfxPanBuckets.push(p);
+        }
+      }
 
       // 2. Music bus: musicDuckGain -> musicGain -> musicCompressor -> masterGain
       const duckGain = ctx.createGain();
@@ -418,7 +429,6 @@ export class AudioEngine {
     if (!this.canAllocateVoice(priority)) return false;
 
     const ctx = this.ctx;
-    const ownDest = !opts.destNode;
     const dest = opts.destNode ?? this.createPannedDest(ctx, this.sfxGain, opts.worldX);
     const startAt = ctx.currentTime + Math.max(0, opts.delaySec ?? 0);
     const src = ctx.createBufferSource();
@@ -433,7 +443,7 @@ export class AudioEngine {
     const g = ctx.createGain();
     g.gain.setValueAtTime(opts.volume ?? 0.85, startAt);
     src.connect(g).connect(dest);
-    this.registerVoice(ctx, src, g, ownDest && dest !== this.sfxGain ? [dest] : [], priority);
+    this.registerVoice(ctx, src, g, [], priority);
     src.start(startAt);
     return true;
   }
@@ -481,15 +491,16 @@ export class AudioEngine {
     return this.activeVoices.length;
   }
 
-  private createPannedDest(ctx: AudioContext, out: GainNode, worldX?: number): AudioNode {
-    if (typeof worldX !== 'number' || typeof ctx.createStereoPanner !== 'function') {
+  private createPannedDest(_ctx: AudioContext, out: GainNode, worldX?: number): AudioNode {
+    if (typeof worldX !== 'number' || this.sfxPanBuckets.length === 0) {
       return out;
     }
-    const pan = Math.max(-0.42, Math.min(0.42, ((worldX / 540) * 2 - 1) * 0.42));
-    const panner = ctx.createStereoPanner();
-    panner.pan.setValueAtTime(pan, ctx.currentTime);
-    panner.connect(out);
-    return panner;
+    const norm = Math.max(0, Math.min(1, worldX / 540));
+    const idx = Math.min(
+      this.sfxPanBuckets.length - 1,
+      Math.max(0, Math.round(norm * (this.sfxPanBuckets.length - 1)))
+    );
+    return this.sfxPanBuckets[idx] ?? out;
   }
 
   private canAllocateVoice(incomingPriority: VoicePriority): boolean {
@@ -973,7 +984,7 @@ export class AudioEngine {
     tGain.gain.setValueAtTime(0.11 * norm, now);
     tGain.gain.exponentialRampToValueAtTime(0.001, now + 0.052);
     thud.connect(tGain).connect(dest);
-    this.registerVoice(ctx, thud, tGain, dest !== out ? [dest] : [], 0);
+    this.registerVoice(ctx, thud, tGain, [], 0);
     thud.start(now);
     thud.stop(now + 0.056);
   }
@@ -1065,7 +1076,7 @@ export class AudioEngine {
       gain.gain.setValueAtTime((cleaved ? 0.14 : 0.10) * velScale, now);
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
       osc.connect(gain).connect(dest);
-      this.registerVoice(ctx, osc, gain, dest !== out ? [dest] : [], voicePri);
+      this.registerVoice(ctx, osc, gain, [], voicePri);
       osc.start(now);
       osc.stop(now + 0.095);
 
@@ -1175,7 +1186,7 @@ export class AudioEngine {
     gain.gain.setValueAtTime(mat === 'granite' ? 0.2 : 0.13, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
     noise.connect(filter).connect(gain).connect(dest);
-    this.registerVoice(ctx, noise, gain, dest !== out ? [filter, dest] : [filter], pri);
+    this.registerVoice(ctx, noise, gain, [filter], pri);
     noise.start(now);
     noise.stop(now + 0.13);
   }
@@ -1200,7 +1211,7 @@ export class AudioEngine {
     bGain.gain.setValueAtTime(0.16, now);
     bGain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
     body.connect(bGain).connect(dest);
-    this.registerVoice(ctx, body, bGain, dest !== out ? [dest] : [], 1);
+    this.registerVoice(ctx, body, bGain, [], 1);
     body.start(now);
     body.stop(now + 0.15);
 
@@ -1255,7 +1266,7 @@ export class AudioEngine {
       nGain.gain.setValueAtTime(0.28, now);
       nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.38);
       noise.connect(filter).connect(nGain).connect(dest);
-      this.registerVoice(ctx, noise, nGain, dest !== out ? [filter, dest] : [filter], 3);
+      this.registerVoice(ctx, noise, nGain, [filter], 3);
       noise.start(now);
       noise.stop(now + 0.39);
     }
@@ -1297,7 +1308,7 @@ export class AudioEngine {
     gain.gain.setValueAtTime(0.085, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
     osc.connect(gain).connect(dest);
-    this.registerVoice(ctx, osc, gain, dest !== out ? [dest] : [], 1);
+    this.registerVoice(ctx, osc, gain, [], 1);
     osc.start(now);
     osc.stop(now + 0.15);
   }
@@ -1319,7 +1330,7 @@ export class AudioEngine {
     gain.gain.setValueAtTime(0.16, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
     osc.connect(gain).connect(dest);
-    this.registerVoice(ctx, osc, gain, dest !== out ? [dest] : [], 2);
+    this.registerVoice(ctx, osc, gain, [], 2);
     osc.start(now);
     osc.stop(now + 0.31);
   }
@@ -1341,7 +1352,7 @@ export class AudioEngine {
     gain.gain.setValueAtTime(0.14, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
     osc.connect(gain).connect(dest);
-    this.registerVoice(ctx, osc, gain, dest !== out ? [dest] : [], 2);
+    this.registerVoice(ctx, osc, gain, [], 2);
     osc.start(now);
     osc.stop(now + 0.27);
   }
@@ -1370,7 +1381,7 @@ export class AudioEngine {
     gain.gain.setValueAtTime(0.12, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
     osc.connect(gain).connect(dest);
-    this.registerVoice(ctx, osc, gain, dest !== out ? [dest] : [], 2);
+    this.registerVoice(ctx, osc, gain, [], 2);
     osc.start(now);
     osc.stop(now + 0.15);
   }
@@ -1403,7 +1414,7 @@ export class AudioEngine {
     gain.gain.setValueAtTime(0.16, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
     osc.connect(gain).connect(dest);
-    this.registerVoice(ctx, osc, gain, dest !== out ? [dest] : [], isWeakPoint ? 3 : 2);
+    this.registerVoice(ctx, osc, gain, [], isWeakPoint ? 3 : 2);
     osc.start(now);
     osc.stop(now + 0.19);
   }
@@ -1559,7 +1570,7 @@ export class AudioEngine {
       gain.gain.setValueAtTime(0.055, now);
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.075);
       noise.connect(bp).connect(gain).connect(dest);
-      this.registerVoice(ctx, noise, gain, dest !== out ? [bp, dest] : [bp], 0);
+      this.registerVoice(ctx, noise, gain, [bp], 0);
       noise.start(now);
       noise.stop(now + 0.08);
       return;
@@ -1581,7 +1592,7 @@ export class AudioEngine {
     gain.gain.setValueAtTime(0.065, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.085);
     osc.connect(gain).connect(dest);
-    this.registerVoice(ctx, osc, gain, dest !== out ? [dest] : [], 0);
+    this.registerVoice(ctx, osc, gain, [], 0);
     osc.start(now);
     osc.stop(now + 0.09);
   }
@@ -1603,7 +1614,7 @@ export class AudioEngine {
     gain.gain.setValueAtTime(0.065, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
     osc.connect(gain).connect(dest);
-    this.registerVoice(ctx, osc, gain, dest !== out ? [dest] : [], 1);
+    this.registerVoice(ctx, osc, gain, [], 1);
     osc.start(now);
     osc.stop(now + 0.085);
   }

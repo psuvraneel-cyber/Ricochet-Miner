@@ -285,6 +285,15 @@ export class InputManager {
     }
     if (this.locked) return;
 
+    if (
+      (e.code === 'Space' || e.code === 'Enter') &&
+      typeof document !== 'undefined' &&
+      document.activeElement instanceof HTMLButtonElement
+    ) {
+      document.activeElement.blur();
+      e.preventDefault();
+    }
+
     if (e.code === 'KeyM') {
       this.callbacks.onToggleMute();
       return;

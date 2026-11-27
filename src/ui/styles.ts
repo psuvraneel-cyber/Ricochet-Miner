@@ -209,6 +209,14 @@ export function injectGameStyles(): void {
         padding: 9px;
         gap: 7px;
       }
+      .rm-gate-hp-bar {
+        position: fixed;
+        top: 8px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(320px, calc(var(--rm-shaft-w, 400px) - 20px));
+        z-index: 15;
+      }
     }
     .rm-bottom-bar {
       position: absolute;
@@ -462,7 +470,7 @@ export function injectGameStyles(): void {
       min-width: 320px;
       max-width: 728px;
       height: 50px;
-      margin: 0 auto;
+      margin: 12px auto 0 auto;
       background: transparent;
       border: none;
       display: flex;

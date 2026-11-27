@@ -24,6 +24,7 @@ export interface ShopCallbacks {
 const BANNER_CONTAINER_ID = 'rm-shop-banner-slot';
 const MIN_BANNER_WIDTH_PX = 320;
 const MIN_BANNER_HEIGHT_PX = 50;
+const MIN_VIEWPORT_HEIGHT_FOR_BANNER_PX = 490;
 
 export class ShopOverlay {
   private backdrop: HTMLElement;
@@ -87,7 +88,7 @@ export class ShopOverlay {
     // Measure available modal interior width without shrinking banner below CrazyGames 320x50 floor
     const availW = this.bannerEl.clientWidth || this.shellEl.clientWidth - 44;
     const availH = window.innerHeight;
-    if (availW < MIN_BANNER_WIDTH_PX || availH < 420) {
+    if (availW < MIN_BANNER_WIDTH_PX || availH < MIN_VIEWPORT_HEIGHT_FOR_BANNER_PX) {
       this.suppressBanner();
       return;
     }
@@ -173,7 +174,7 @@ export class ShopOverlay {
         const freeAdBtn =
           freeUpgradeCandidate === spec.id
             ? AdButton.renderMarkup({
-                labelHtml: '',
+                labelHtml: i18n.t('free_short'),
                 attrs: `data-free-upg="${spec.id}" aria-label="${i18n.t('free_upgrade_cta')}"`,
                 className: 'rm-btn rm-btn-gold',
                 style: 'min-height:40px;padding:4px 8px;font-size:11px;',
@@ -191,7 +192,7 @@ export class ShopOverlay {
                 <span style="font-weight:900;font-size:13px;text-shadow:0 2px 0 #120c08;">${i18n.t(spec.nameKey as TranslationKey)}</span>
                 <span class="rm-lv-pill">LV. ${level}/${maxLevel}</span>
               </div>
-              <div style="font-size:11px;color:#cbd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+              <div style="font-size:11px;color:#cbd5e1;line-height:1.25;">
                 ${i18n.t(spec.descKey as TranslationKey)}
               </div>
             </div>

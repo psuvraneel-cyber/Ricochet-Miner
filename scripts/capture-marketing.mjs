@@ -197,6 +197,24 @@ async function smoothSlingshotRelease(page, fromX, fromY, toX, toY, steps = 14, 
   await page.mouse.up();
 }
 
+async function dismissPerkDraftIfOpen(page) {
+  const perk = page.locator('[data-perk]').first();
+  if (await perk.isVisible().catch(() => false)) {
+    await perk.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(140);
+    return true;
+  }
+  return false;
+}
+
+async function waitHandlingPerks(page, totalMs) {
+  const start = Date.now();
+  while (Date.now() - start < totalMs) {
+    await dismissPerkDraftIfOpen(page);
+    await page.waitForTimeout(120);
+  }
+}
+
 async function captureScreenshots(browser, baseUrl) {
   fs.mkdirSync(SHOTS_DIR, { recursive: true });
   const W = 1280;
@@ -287,21 +305,30 @@ async function captureScreenshots(browser, baseUrl) {
     }
 
     let capturedBoss = false;
-    for (let i = 0; i < 45; i++) {
+    for (let i = 0; i < 90; i++) {
       await page.waitForTimeout(120);
+      await dismissPerkDraftIfOpen(page);
       const gateVisible = await page.evaluate(() => {
         const el = document.querySelector('.rm-gate-hp-bar');
         return Boolean(el && getComputedStyle(el).display !== 'none');
       });
       if (gateVisible) {
-        await page.waitForTimeout(160);
+        await page.waitForTimeout(240);
+        await dismissPerkDraftIfOpen(page);
         await page.screenshot({ path: path.join(SHOTS_DIR, '04_boss_gate_fight.png') });
         capturedBoss = true;
         break;
       }
+      // If run ended before reaching boss gate, relaunch immediately
+      const relaunch = page.locator('[data-act="relaunch"]');
+      if (await relaunch.isVisible().catch(() => false)) {
+        await relaunch.click({ force: true });
+        await page.waitForTimeout(200);
+        await smoothSlingshotRelease(page, W * 0.5, H * 0.36, W * 0.5 + 10, H * 0.36 - 98, 8);
+      }
     }
     if (!capturedBoss) {
-      await page.screenshot({ path: path.join(SHOTS_DIR, '04_boss_gate_fight.png') });
+      throw new Error('04_boss_gate_fight.png failed to reach active Boss Gate');
     }
     await context.close();
   }
@@ -383,17 +410,19 @@ async function recordChoreographedVideo(browser, baseUrl, width, height, outFile
     ]
   );
 
-  // 0:02 - 0:08.5: Multi-orb ricochet + Mag-Pulse + Overclock payoff
-  await page.waitForTimeout(2400);
+  // 0:02 - 0:08.5: Multi-orb ricochet + Mag-Pulse + Overclock payoff (auto-dismissing any Vault Relic Draft)
+  await waitHandlingPerks(page, 2400);
   await page.keyboard.press('KeyE');
-  await page.waitForTimeout(1800);
+  await waitHandlingPerks(page, 1800);
   await page.keyboard.press('Space');
-  await page.waitForTimeout(2500);
+  await waitHandlingPerks(page, 2500);
+  await dismissPerkDraftIfOpen(page);
   const recallBtn = page.locator('[data-hud="recall"]');
   if (await recallBtn.isVisible()) {
     await recallBtn.click();
     await page.waitForTimeout(500);
   }
+  await dismissPerkDraftIfOpen(page);
   const summaryRelaunch = page.locator('[data-act="relaunch"]');
   if (await summaryRelaunch.isVisible()) {
     await summaryRelaunch.click();
@@ -449,7 +478,7 @@ async function recordChoreographedVideo(browser, baseUrl, width, height, outFile
     12,
     [{ x: cx + 42, y: cy - 82 }]
   );
-  await page.waitForTimeout(7800);
+  await waitHandlingPerks(page, 7800);
 
   const videoObj = page.video();
   await context.close();

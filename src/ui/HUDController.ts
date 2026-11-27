@@ -337,6 +337,7 @@ export class HUDController {
 
     if (!params.isTitle && params.activeGate && params.activeGate.maxHp > 0) {
       const pct = Math.max(0, Math.min(100, (params.activeGate.hp / params.activeGate.maxHp) * 100));
+      this.bossRowEl.style.display = 'none';
       this.gateHpBarEl.style.display = 'flex';
       this.gateHpBarEl.classList.toggle('critical', pct <= 20);
       this.gateTitleEl.textContent = `${i18n.t('boss_gate')} (${params.activeGate.coresAlive}/3)`;

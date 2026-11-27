@@ -13,10 +13,10 @@ Generated from production build (`dist/standalone`) with zero dev QA overlays an
 | Cover / Icon | `covers/icon_512x512.png` | 639.5 KB | Yandex / Poki / itch.io Square Icon (1:1) |
 | Cover / Icon | `covers/yandex_cover_800x470.png` | 877.6 KB | Yandex Games Catalog Cover |
 | Cover / Icon | `covers/yandex_hero_1560x520.png` | 1.86 MB | Yandex Games Hero Banner |
-| Screenshot | `screenshots/01_title_screen.png` | 971.2 KB | Title Screen (All Portals) |
-| Screenshot | `screenshots/02_mid_run_ricochet_tnt.png` | 1.29 MB | Core Ricochet + TNT Action (All Portals) |
-| Screenshot | `screenshots/03_shop_skins.png` | 594.4 KB | Sawblade Skins & Upgrades Shop (All Portals) |
-| Screenshot | `screenshots/04_boss_gate_fight.png` | 633.6 KB | Bedrock Boss Gate Fight (All Portals) |
-| Screenshot | `screenshots/05_hall_of_ascension.png` | 590.5 KB | Hall of Ascension Endgame (All Portals) |
-| Preview Video | `videos/ricochet_miner_preview_16x9_1080p.mp4` | 6.87 MB | CrazyGames Mandatory Landscape Video (16:9) + Poki/Yandex |
-| Preview Video | `videos/ricochet_miner_preview_2x3_portrait.mp4` | 3.44 MB | CrazyGames Mandatory Portrait Video (2:3) |
+| Screenshot | `screenshots/01_title_screen.png` | 950.2 KB | Title Screen (All Portals) |
+| Screenshot | `screenshots/02_mid_run_ricochet_tnt.png` | 1.35 MB | Core Ricochet + TNT Action (All Portals) |
+| Screenshot | `screenshots/03_shop_skins.png` | 586.2 KB | Sawblade Skins & Upgrades Shop (All Portals) |
+| Screenshot | `screenshots/04_boss_gate_fight.png` | 1.04 MB | Bedrock Boss Gate Fight (All Portals) |
+| Screenshot | `screenshots/05_hall_of_ascension.png` | 580.7 KB | Hall of Ascension Endgame (All Portals) |
+| Preview Video | `videos/ricochet_miner_preview_16x9_1080p.mp4` | 19.39 MB | CrazyGames Mandatory Landscape Video (16:9) + Poki/Yandex |
+| Preview Video | `videos/ricochet_miner_preview_2x3_portrait.mp4` | 9.83 MB | CrazyGames Mandatory Portrait Video (2:3) |

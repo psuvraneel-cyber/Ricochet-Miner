@@ -55,7 +55,7 @@ const SVG_MAP: Record<IconName, string> = {
   gem: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none"><path d="M6 4h12l4 6-10 11L2 10l4-6z" fill="#e879f9" stroke="#1a1310" stroke-width="2" stroke-linejoin="round"/></svg>`,
   close: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="#f8fafc" stroke-width="2.8" stroke-linecap="round"/></svg>`,
   lock: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none"><rect x="5" y="11" width="14" height="9" rx="2" fill="#94a3b8" stroke="#1a1310" stroke-width="2"/><path d="M8 11V8a4 4 0 018 0v3" stroke="#cbd5e1" stroke-width="2.2"/></svg>`,
-  check: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none"><path d="M5 13l4 4L19 7" stroke="#4ade80" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  check: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none"><path d="M5 13l4 4L19 7" stroke="#1a1310" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 13l4 4L19 7" stroke="#4ade80" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   fastForward: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none"><path d="M4 6l8 6-8 6V6zm9 0l8 6-8 6V6z" fill="#fde047" stroke="#1a1310" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
   recall: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none"><path d="M12 19V6m0 0l-5 5m5-5l5 5" stroke="#f8fafc" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   restart: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none"><path d="M4 12a8 8 0 102.3-5.6L4 9m0-5v5h5" stroke="#f8fafc" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`,

@@ -306,28 +306,44 @@ export class Renderer {
       const texW = flankTex.width || 512;
       const texH = flankTex.height || 768;
       const tileH = Math.round((texH / texW) * tileW);
-      const scrollY = (cameraY * 0.65 * scale) % tileH;
+      const scrollRaw = cameraY * 0.65 * scale;
+      const baseTile = Math.floor(scrollRaw / tileH);
+      const scrollY = scrollRaw - baseTile * tileH;
+
+      const drawFlankColumn = (startTileOffset: number) => {
+        for (let idx = -1; idx <= Math.ceil((cssHeight + scrollY) / tileH); idx++) {
+          const y = idx * tileH - scrollY;
+          const tileIndex = baseTile + idx + startTileOffset;
+          const mirroredY = Math.abs(tileIndex) % 2 === 1;
+          if (mirroredY) {
+            ctx.save();
+            ctx.translate(0, y + tileH);
+            ctx.scale(1, -1);
+            ctx.drawImage(flankTex, 0, -1, tileW, tileH + 2);
+            ctx.restore();
+          } else {
+            ctx.drawImage(flankTex, 0, y - 1, tileW, tileH + 2);
+          }
+        }
+      };
 
       // Left flank
       ctx.save();
       ctx.beginPath();
       ctx.rect(0, 0, shaftX, cssHeight);
       ctx.clip();
-      for (let y = -scrollY - tileH; y < cssHeight + tileH; y += tileH) {
-        ctx.drawImage(flankTex, shaftX - tileW, y, tileW, tileH + 1);
-      }
+      ctx.translate(shaftX - tileW, 0);
+      drawFlankColumn(0);
       ctx.restore();
 
-      // Right flank (horizontally mirrored for natural variety)
+      // Right flank (horizontally mirrored + alternating vertical reflection for zero horizontal seam)
       ctx.save();
       ctx.beginPath();
       ctx.rect(rightX, 0, rightW, cssHeight);
       ctx.clip();
       ctx.translate(rightX + tileW, 0);
       ctx.scale(-1, 1);
-      for (let y = -scrollY - tileH; y < cssHeight + tileH; y += tileH) {
-        ctx.drawImage(flankTex, 0, y, tileW, tileH + 1);
-      }
+      drawFlankColumn(0);
       ctx.restore();
     }
 
@@ -347,20 +363,23 @@ export class Renderer {
     ctx.fillRect(rightX, 0, rightW, cssHeight);
 
     // Uniform mathematical depth ruler along far-left edge (10m, 20m, 30m...)
-    this.renderDepthRuler(ctx, cssHeight, cameraY, baseDepthMeters, scale, topOffsetPx);
+    this.renderDepthRuler(ctx, cssWidth, cssHeight, cameraY, baseDepthMeters, scale, topOffsetPx, isPortrait);
   }
 
   private renderDepthRuler(
     ctx: CanvasRenderingContext2D,
+    cssWidth: number,
     cssHeight: number,
     cameraY: number,
     baseDepthMeters: number,
     scale: number,
-    topOffsetPx: number
+    topOffsetPx: number,
+    isPortrait: boolean
   ): void {
     const pxPerMeter = PHYSICS_CONFIG.TILE_SIZE / PHYSICS_CONFIG.METERS_PER_ROW;
     const minDepth = Math.max(0, Math.floor((baseDepthMeters + cameraY / pxPerMeter) / 10) * 10);
     const maxDepth = minDepth + Math.ceil(cssHeight / (pxPerMeter * scale * 10)) * 10 + 10;
+    const minSafeY = isPortrait ? topOffsetPx + 20 : cssWidth < 1000 ? 182 : 158;
 
     ctx.save();
     ctx.font = '700 12px "Lilita One", "Fredoka", system-ui, sans-serif';
@@ -370,7 +389,7 @@ export class Renderer {
     for (let d = minDepth; d <= maxDepth; d += 5) {
       const worldY = (d - baseDepthMeters) * pxPerMeter;
       const screenY = topOffsetPx + (worldY - cameraY) * scale;
-      if (screenY < Math.max(58, topOffsetPx + 20) || screenY > cssHeight - 16) continue;
+      if (screenY < minSafeY || screenY > cssHeight - 16) continue;
 
       const isMajor = d % 10 === 0;
       ctx.fillStyle = isMajor ? '#fde68a' : 'rgba(226, 232, 240, 0.55)';
